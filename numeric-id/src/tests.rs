@@ -12,6 +12,42 @@ fn to_vec(map: &DenseIdMap<Id, &'static str>) -> Vec<(Id, &'static str)> {
     map.iter().map(|(x, y)| (x, *y)).collect::<Vec<_>>()
 }
 
+pub(crate) fn assert_free_list_invariants<K, V>(map: &DenseIdMap<K, V>) {
+    use crate::{FreeListNode, Slot};
+
+    // check that all free nodes point to free nodes
+    let mut num_free = 0;
+    for slot in &map.data {
+        if let Slot::Free(node) = slot {
+            num_free += 1;
+            if let Some(prev) = node.prev {
+                assert!(matches!(map.data[prev], Slot::Free(_)));
+            }
+            if let Some(next) = node.next {
+                assert!(matches!(map.data[next], Slot::Free(_)));
+            }
+        }
+    }
+
+    // check that walking the free list is successful
+    match &map.free {
+        None => assert_eq!(num_free, 0),
+        Some(free) => {
+            let mut node = free.head;
+            loop {
+                match map.data[node] {
+                    Slot::Full(_) => panic!(),
+                    Slot::Free(FreeListNode { next, .. }) => match next {
+                        None => break,
+                        Some(next) => node = next,
+                    },
+                }
+            }
+            assert_eq!(node, free.last);
+        }
+    }
+}
+
 #[test]
 fn push() {
     let mut map = DenseIdMap::<Id, &'static str>::new();
@@ -20,6 +56,7 @@ fn push() {
     let second = map.next_id();
     assert_eq!(second, map.push("one"));
     assert_eq!(to_vec(&map), vec![(first, "zero"), (second, "one")]);
+    assert_free_list_invariants(&map);
 }
 
 #[test]
@@ -42,6 +79,8 @@ fn basic_id_map() {
         to_vec(&map),
         vec![(Id::from_usize(2), "two"), (Id::from_usize(4), "four")]
     );
+
+    assert_free_list_invariants(&map);
 }
 
 #[test]
@@ -56,6 +95,8 @@ fn get_or_insert() {
 
     map.get_or_insert(id, || "three");
     assert_eq!(to_vec(&map), vec![(id, "")]);
+
+    assert_free_list_invariants(&map);
 }
 
 #[test]

@@ -256,18 +256,28 @@ impl Database {
         self.external_functions.push(Box::new(f))
     }
 
+    /// Remove a bound external function from the database.
+    /// This is useful for preventing memory leaks.
+    pub fn remove_external_function(&mut self, id: ExternalFunctionId) {
+        self.external_functions.take(id);
+    }
+
+    /// Get an immutable reference to the primitives.
     pub fn primitives(&self) -> &Primitives {
         &self.primitives
     }
 
+    /// Get a mutable reference to the primitives.
     pub fn primitives_mut(&mut self) -> &mut Primitives {
         &mut self.primitives
     }
 
+    /// Get an immutable reference to the containers.
     pub fn containers(&self) -> &Containers {
         &self.containers
     }
 
+    /// Get a mutable reference to the containers.
     pub fn containers_mut(&mut self) -> &mut Containers {
         &mut self.containers
     }

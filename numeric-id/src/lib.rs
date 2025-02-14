@@ -47,14 +47,73 @@ impl NumericId for usize {
 /// with no hashing. For sparse mappings, use a HashMap.
 #[derive(Clone)]
 pub struct DenseIdMap<K, V> {
-    data: Vec<Option<V>>,
+    free: Option<FreeList>,
+    data: Vec<Slot<V>>,
     _marker: PhantomData<K>,
+}
+
+#[derive(Clone, Debug)]
+enum Slot<V> {
+    Free(FreeListNode),
+    Full(V),
+}
+
+#[derive(Clone, Debug)]
+struct FreeList {
+    head: usize,
+    last: usize,
+}
+
+#[derive(Clone, Debug)]
+struct FreeListNode {
+    next: Option<usize>,
+    prev: Option<usize>,
+}
+
+impl<V> From<Slot<V>> for Option<V> {
+    fn from(slot: Slot<V>) -> Option<V> {
+        match slot {
+            Slot::Full(v) => Some(v),
+            Slot::Free(_) => None,
+        }
+    }
+}
+
+impl<V> Slot<V> {
+    fn as_ref(&self) -> Option<&V> {
+        match self {
+            Slot::Full(v) => Some(v),
+            Slot::Free(_) => None,
+        }
+    }
+
+    fn as_mut(&mut self) -> Option<&mut V> {
+        match self {
+            Slot::Full(v) => Some(v),
+            Slot::Free(_) => None,
+        }
+    }
+
+    fn set_prev(&mut self, x: Option<usize>) {
+        match self {
+            Slot::Full(_) => panic!("tried to set_prev on full slot"),
+            Slot::Free(FreeListNode { prev, .. }) => *prev = x,
+        }
+    }
+
+    fn set_next(&mut self, x: Option<usize>) {
+        match self {
+            Slot::Full(_) => panic!("tried to set_next on full slot"),
+            Slot::Free(FreeListNode { next, .. }) => *next = x,
+        }
+    }
 }
 
 impl<K: NumericId + Debug, V: Debug> Debug for DenseIdMap<K, V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "{:?}", self.free)?;
         let mut map = f.debug_map();
-        for (k, v) in self.iter() {
+        for (k, v) in self.data.iter().enumerate() {
             map.entry(&k, v);
         }
         map.finish()
@@ -64,7 +123,8 @@ impl<K: NumericId + Debug, V: Debug> Debug for DenseIdMap<K, V> {
 impl<K, V> Default for DenseIdMap<K, V> {
     fn default() -> Self {
         Self {
-            data: Vec::new(),
+            free: Default::default(),
+            data: Default::default(),
             _marker: PhantomData,
         }
     }
@@ -101,20 +161,54 @@ impl<K: NumericId, V> DenseIdMap<K, V> {
 
     /// Insert the given mapping into the table.
     pub fn insert(&mut self, key: K, value: V) {
+        #[cfg(test)]
+        crate::tests::assert_free_list_invariants(self);
+
         self.reserve_space(key);
-        self.data[key.index()] = Some(value);
+
+        #[cfg(test)]
+        crate::tests::assert_free_list_invariants(self);
+
+        if let Slot::Free(FreeListNode { prev, next }) = self.data[key.index()] {
+            #[cfg(test)]
+            crate::tests::assert_free_list_invariants(self);
+
+            if let Some(prev) = prev {
+                #[cfg(test)]
+                crate::tests::assert_free_list_invariants(self);
+
+                self.data[prev].set_next(next);
+            }
+            if let Some(next) = next {
+                self.data[next].set_prev(prev);
+            }
+
+            if prev.is_none() && next.is_none() {
+                self.free = None;
+            } else {
+                let Some(free) = &mut self.free else {
+                    panic!("free was none but there was a free node")
+                };
+                if free.head == key.index() {
+                    free.head = next.unwrap();
+                }
+                if free.last == key.index() {
+                    free.last = prev.unwrap();
+                }
+            }
+        }
+        self.data[key.index()] = Slot::Full(value);
     }
 
     /// Get the key that would be returned by the next call to [`DenseIdMap::push`].
     pub fn next_id(&self) -> K {
-        K::from_usize(self.data.len())
+        K::from_usize(self.free.as_ref().map_or(self.data.len(), |x| x.head))
     }
 
-    /// Add the given mapping to the table, returning the key corresponding to
-    /// [`DenseIdMap::n_ids`].
+    /// Add the given mapping to the table, returning the key that maps to it,
     pub fn push(&mut self, val: V) -> K {
         let res = self.next_id();
-        self.data.push(Some(val));
+        self.insert(res, val);
         res
     }
 
@@ -125,30 +219,57 @@ impl<K: NumericId, V> DenseIdMap<K, V> {
 
     /// Get a mutable reference to the current mapping for `key` in the table.
     pub fn get_mut(&mut self, key: K) -> Option<&mut V> {
-        self.reserve_space(key);
+        // TODO: why does this make sense?
+        // self.reserve_space(key);
         self.data.get_mut(key.index())?.as_mut()
     }
 
-    /// Extract the value mapped to by `key` from the table.
+    /// Remove the value mapped to by `key` from the table.
     ///
     /// # Panics
     /// This method panics if `key` is not in the table.
     pub fn unwrap_val(&mut self, key: K) -> V {
-        self.reserve_space(key);
-        self.data.get_mut(key.index()).unwrap().take().unwrap()
+        self.take(key).unwrap()
     }
 
-    /// Extract the value mapped to by `key` from the table, if it is present.
+    /// Remove the value mapped to by `key` from the table, if it is present.
     pub fn take(&mut self, key: K) -> Option<V> {
-        self.reserve_space(key);
-        self.data.get_mut(key.index()).unwrap().take()
+        match self.data.get(key.index())? {
+            Slot::Free(_) => None,
+            Slot::Full(_) => match &mut self.free {
+                None => {
+                    self.free = Some(FreeList {
+                        head: key.index(),
+                        last: key.index(),
+                    });
+                    let mut res = Slot::Free(FreeListNode {
+                        prev: None,
+                        next: None,
+                    });
+                    std::mem::swap(&mut res, &mut self.data[key.index()]);
+                    Option::from(res)
+                }
+                Some(free) => {
+                    self.data[free.last].set_next(Some(key.index()));
+                    let mut res = Slot::Free(FreeListNode {
+                        prev: Some(free.last),
+                        next: None,
+                    });
+                    free.last = key.index();
+                    std::mem::swap(&mut res, &mut self.data[key.index()]);
+                    Option::from(res)
+                }
+            },
+        }
     }
 
     /// Get the current mapping for `key` in the table, or insert the value
     /// returned by `f` and return a mutable reference to it.
     pub fn get_or_insert(&mut self, key: K, f: impl FnOnce() -> V) -> &mut V {
-        self.reserve_space(key);
-        self.data[key.index()].get_or_insert_with(f)
+        if self.get(key).is_none() {
+            self.insert(key, f())
+        }
+        self.get_mut(key).unwrap()
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (K, &V)> {
@@ -167,18 +288,49 @@ impl<K: NumericId, V> DenseIdMap<K, V> {
 
     /// Reserve space up to the given key in the table.
     pub fn reserve_space(&mut self, key: K) {
-        let index = key.index();
-        if index >= self.data.len() {
-            self.data.resize_with(index + 1, || None);
+        let old_len = self.data.len();
+        let new_len = key.index() + 1;
+        if new_len > old_len {
+            let mut i = old_len;
+            self.data.resize_with(new_len, || {
+                let res = Slot::Free(FreeListNode {
+                    prev: if i == old_len {
+                        self.free.as_ref().map(|x| x.last)
+                    } else {
+                        Some(i - 1)
+                    },
+                    next: if i == key.index() { None } else { Some(i + 1) },
+                });
+                i += 1;
+                res
+            });
+
+            match &mut self.free {
+                Some(free) => {
+                    if free.last >= self.data.len() {
+                        #[cfg(test)]
+                        crate::tests::assert_free_list_invariants(self)
+                    } else {
+                        self.data[free.last].set_next(Some(old_len));
+                        free.last = new_len - 1;
+                    }
+                }
+                None => {
+                    self.free = Some(FreeList {
+                        head: old_len,
+                        last: new_len - 1,
+                    })
+                }
+            }
         }
     }
 
     pub fn drain(&mut self) -> impl Iterator<Item = (K, V)> + '_ {
-        // To avoid the need to write down the return type.
+        self.free = None;
         self.data
             .drain(..)
             .enumerate()
-            .filter_map(|(i, v)| Some((K::from_usize(i), v?)))
+            .filter_map(|(i, v)| Some((K::from_usize(i), Option::from(v)?)))
     }
 }
 
@@ -222,14 +374,14 @@ impl<K: NumericId, V: Default> DenseIdMap<K, V> {
 
 pub struct IdVec<K, V> {
     data: Vec<V>,
-    _marker: std::marker::PhantomData<K>,
+    _marker: PhantomData<K>,
 }
 
 impl<K, V> Default for IdVec<K, V> {
     fn default() -> IdVec<K, V> {
         IdVec {
             data: Default::default(),
-            _marker: std::marker::PhantomData,
+            _marker: PhantomData,
         }
     }
 }
@@ -238,7 +390,7 @@ impl<K: NumericId, V> IdVec<K, V> {
     pub fn with_capacity(cap: usize) -> IdVec<K, V> {
         IdVec {
             data: Vec::with_capacity(cap),
-            _marker: std::marker::PhantomData,
+            _marker: PhantomData,
         }
     }
 
