@@ -137,7 +137,6 @@ type BuildRuleCallback = Box<dyn Brc>;
 #[derive(Clone)]
 pub(crate) struct Query {
     uf_table: TableId,
-    placeholder_table: TableId,
     id_counter: CounterId,
     tracing: bool,
     rule_id: RuleId,
@@ -168,7 +167,6 @@ pub struct RuleBuilder<'a> {
 impl EGraph {
     pub fn new_rule_described(&mut self, desc: &str) -> RuleBuilder {
         let uf_table = self.uf_table;
-        let placeholder_table = self.placeholder_table;
         let id_counter = self.id_counter;
         let tracing = self.tracing;
         let rule_id = self.rules.reserve_slot();
@@ -178,7 +176,6 @@ impl EGraph {
             query: Query {
                 uf_table,
                 id_counter,
-                placeholder_table,
                 tracing,
                 rule_id,
                 seminaive: true,
@@ -910,21 +907,15 @@ impl Query {
             }
         }
         // For N atoms, we create N queries for seminaive evaluation.
-        if !self.seminaive {
+        if !self.seminaive || self.atoms.is_empty() {
+            // NB: if there are no atoms, we want to generate a plan that only mentions "actions"
+            // with no queries. core-relations will then run the actions once. This is similar to
+            // naive evaluation in that we want to generate 1 rule, rather than 1 rule per atom.
             let (mut qb, inner) = self.query_state(rsb, next_ts);
             for (table, entries) in &self.atoms {
                 let dst_vars = inner.convert_all(entries);
                 qb.add_atom(*table, &dst_vars, &[])?;
             }
-            return self.run_rules_and_build(qb, inner, desc);
-        }
-        if self.atoms.is_empty() {
-            let (mut qb, inner) = self.query_state(rsb, next_ts);
-            // For rules with no LHS, we run the RHS once. core-relations needs at least one
-            // successful variable binding in order to run the RHS. So we insert a binding for the
-            // single value in the placeholder table.
-            let x = qb.new_var();
-            qb.add_atom(self.placeholder_table, &[x.into()], &[])?;
             return self.run_rules_and_build(qb, inner, desc);
         }
         if let Some(focus_atom) = self.sole_focus {

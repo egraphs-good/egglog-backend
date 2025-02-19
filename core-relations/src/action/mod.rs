@@ -274,9 +274,13 @@ impl ExecutionState<'_> {
 
 impl ExecutionState<'_> {
     pub(crate) fn run_instrs(&mut self, instrs: &[Instr], bindings: &mut Bindings) {
+        if bindings.next_id().rep() == 0 {
+            // Run instructions once if no variables are bound.
+            bindings.push(Pooled::new(vec![Value::new(0)]));
+        }
         let Some(batch_size) = bindings.iter().map(|(_, x)| x.len()).next() else {
-            // Empty bindings; nothing to do.
-            return;
+            // Bindings cannot be empty (see above)
+            unreachable!()
         };
         with_pool_set(|ps| {
             let mut mask = Mask::new(0..batch_size, ps);

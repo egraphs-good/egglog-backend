@@ -61,11 +61,6 @@ impl Timestamp {
 pub struct EGraph {
     db: Database,
     uf_table: TableId,
-    /// A table with a single element used to bind a placeholder variable for right-hand-side only
-    /// rules. core-relations requires at least one variable to be bound on the LHS of a rule
-    /// before the RHS can be run. Egglog supports rules that only specify a right-hand side but
-    /// run once.
-    placeholder_table: TableId,
     id_counter: CounterId,
     reason_counter: CounterId,
     timestamp_counter: CounterId,
@@ -110,15 +105,6 @@ impl EGraph {
         let id_counter = db.add_counter();
         let trace_counter = db.add_counter();
         let ts_counter = db.add_counter();
-        let placeholder_table = db.add_table(
-            SortedWritesTable::new(1, 1, None, vec![], |_, _, _, _| false),
-            iter::empty(),
-            iter::empty(),
-        );
-        db.get_table(placeholder_table)
-            .new_buffer()
-            .stage_insert(&[Value::new(0)]);
-        db.merge_table(placeholder_table);
         // Start the timestamp counter at 1.
         db.inc_counter(ts_counter);
 
@@ -126,7 +112,6 @@ impl EGraph {
             db,
             uf_table,
             id_counter,
-            placeholder_table,
             reason_counter: trace_counter,
             timestamp_counter: ts_counter,
             rules: Default::default(),
