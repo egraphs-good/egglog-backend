@@ -137,6 +137,7 @@ type BuildRuleCallback = Box<dyn Brc>;
 #[derive(Clone)]
 pub(crate) struct Query {
     uf_table: TableId,
+    placeholder_table: TableId,
     id_counter: CounterId,
     tracing: bool,
     rule_id: RuleId,
@@ -167,6 +168,7 @@ pub struct RuleBuilder<'a> {
 impl EGraph {
     pub fn new_rule_described(&mut self, desc: &str) -> RuleBuilder {
         let uf_table = self.uf_table;
+        let placeholder_table = self.placeholder_table;
         let id_counter = self.id_counter;
         let tracing = self.tracing;
         let rule_id = self.rules.reserve_slot();
@@ -176,6 +178,7 @@ impl EGraph {
             query: Query {
                 uf_table,
                 id_counter,
+                placeholder_table,
                 tracing,
                 rule_id,
                 seminaive: true,
@@ -913,6 +916,15 @@ impl Query {
                 let dst_vars = inner.convert_all(entries);
                 qb.add_atom(*table, &dst_vars, &[])?;
             }
+            return self.run_rules_and_build(qb, inner, desc);
+        }
+        if self.atoms.is_empty() {
+            let (mut qb, inner) = self.query_state(rsb, next_ts);
+            // For rules with no LHS, we run the RHS once. core-relations needs at least one
+            // successful variable binding in order to run the RHS. So we insert a binding for the
+            // single value in the placeholder table.
+            let x = qb.new_var();
+            qb.add_atom(self.placeholder_table, &[x.into()], &[])?;
             return self.run_rules_and_build(qb, inner, desc);
         }
         if let Some(focus_atom) = self.sole_focus {

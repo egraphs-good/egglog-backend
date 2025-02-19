@@ -3,6 +3,7 @@ use std::thread;
 use core_relations::{make_external_func, Container, ExternalFunctionId, Rebuilder, Value};
 use log::debug;
 use num_rational::Rational64;
+use numeric_id::NumericId;
 
 use crate::{add_expressions, define_rule, ColumnTy, DefaultVal, EGraph, Function, MergeFn};
 
@@ -700,6 +701,40 @@ fn basic_container() {
     for _ in 0..8 {
         container_test()
     }
+}
+
+#[test]
+fn rhs_only_rule() {
+    let mut egraph = EGraph::default();
+    let int_prim = egraph.primitives_mut().register_type::<i64>();
+    let zero = egraph.primitives_mut().get(0i64);
+    let one = egraph.primitives_mut().get(1i64);
+    let num_table = egraph.add_table(
+        vec![ColumnTy::Primitive(int_prim), ColumnTy::Id],
+        DefaultVal::FreshId,
+        MergeFn::UnionId,
+        "num",
+    );
+    let add_data = {
+        let mut rb = egraph.new_rule();
+        let _zero_id = rb.lookup(Function::Table(num_table), &[zero.into()]);
+        let _one_id = rb.lookup(Function::Table(num_table), &[one.into()]);
+        rb.build()
+    };
+
+    let mut contents = Vec::new();
+
+    assert!(contents.is_empty());
+    assert!(egraph.run_rules(&[add_data]).unwrap());
+    egraph.dump_table(num_table, |vals| {
+        contents.push(vals.to_vec());
+    });
+
+    contents.sort();
+    assert_eq!(
+        contents,
+        vec![vec![zero, Value::new(0)], vec![one, Value::new(1)]]
+    );
 }
 
 const _: () = {
