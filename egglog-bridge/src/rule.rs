@@ -907,7 +907,10 @@ impl Query {
             }
         }
         // For N atoms, we create N queries for seminaive evaluation.
-        if !self.seminaive {
+        if !self.seminaive || self.atoms.is_empty() {
+            // NB: if there are no atoms, we want to generate a plan that only mentions "actions"
+            // with no queries. core-relations will then run the actions once. This is similar to
+            // naive evaluation in that we want to generate 1 rule, rather than 1 rule per atom.
             let (mut qb, inner) = self.query_state(rsb, next_ts);
             for (table, entries) in &self.atoms {
                 let dst_vars = inner.convert_all(entries);
