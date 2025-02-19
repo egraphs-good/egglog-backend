@@ -723,6 +723,9 @@ fn rhs_only_rule() {
     };
 
     let mut contents = Vec::new();
+    egraph.dump_table(num_table, |vals| {
+        contents.push(vals.to_vec());
+    });
 
     assert!(contents.is_empty());
     assert!(egraph.run_rules(&[add_data]).unwrap());
