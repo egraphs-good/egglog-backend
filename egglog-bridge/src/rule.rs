@@ -4,7 +4,7 @@
 //! parameterized by a range of timestamps used as constraints during seminaive
 //! evaluation.
 
-use std::{cmp::Ordering, iter, sync::Arc};
+use std::{cmp::Ordering, sync::Arc};
 
 use anyhow::Context;
 use core_relations::{
@@ -454,28 +454,6 @@ impl RuleBuilder<'_> {
                 // primitive, along with an assertion that the result equals the
                 // return value.
                 let entries = self.with_constant_types(Function::Prim(p), entries);
-                let prim_schema = self.egraph.db.primitives().get_schema(p);
-                if prim_schema.args.len() + 1 != entries.len() {
-                    return Err(anyhow::Error::from(RuleBuilderError::ArityMismatch {
-                        expected: prim_schema.args.len(),
-                        got: entries.len(),
-                    }))
-                    .with_context(|| {
-                        format!(
-                            "add_atom/primitive: mismatch between {entries:?} and {:?}",
-                            prim_schema.args
-                        )
-                    });
-                }
-                entries
-                    .iter()
-                    .zip(prim_schema.args.iter().chain(iter::once(&prim_schema.ret)))
-                    .try_for_each(|(entry, ty)| {
-                        self.assert_has_ty(entry, ColumnTy::Primitive(*ty))
-                            .with_context(|| {
-                                format!("add_atom/primitive: mismatch between {entry:?} and {ty:?}")
-                            })
-                    })?;
 
                 let lhs_term = Arc::new(TermFragment::Prim(
                     p,
@@ -496,7 +474,11 @@ impl RuleBuilder<'_> {
                         });
                     }
                     Entry::Const(primitive_constant) => {
-                        let anon = self.new_var(ColumnTy::Primitive(prim_schema.ret));
+                        let anon = self.new_var(
+                            self.egraph
+                                .get_return_ty(p)
+                                .expect("proofs currently require return types to be declared"),
+                        );
                         self.proof_builder.syntax.rhs_bindings.push(Binding {
                             var: anon,
                             syntax: lhs_term,
@@ -544,22 +526,9 @@ impl RuleBuilder<'_> {
                     })
                     .collect()
             }
-            Function::Prim(pfunc) => {
-                let schema = self.egraph.db.primitives().get_schema(pfunc);
-                entries
-                    .iter()
-                    .zip(schema.args.iter())
-                    .map(|(entry, ty)| {
-                        if let QueryEntry::Const { val, .. } = entry {
-                            QueryEntry::Const {
-                                val,
-                                ty: Some(ColumnTy::Primitive(*ty)),
-                            }
-                        } else {
-                            entry.clone()
-                        }
-                    })
-                    .collect()
+            Function::Prim(_) => {
+                log::warn!("with_constant_types called with a primitive function");
+                entries.to_vec()
             }
         }
     }
@@ -688,9 +657,11 @@ impl RuleBuilder<'_> {
                 )
             }
             Function::Prim(p) => {
-                let ret = self.egraph.db.primitives().get_schema(p).ret;
                 let res = self.query.vars.push(VarInfo {
-                    ty: ColumnTy::Primitive(ret),
+                    ty: self.egraph.get_return_ty(p).unwrap_or_else(|| {
+                        log::warn!("unknown return type for primitive {:?}", p);
+                        ColumnTy::Id
+                    }),
                     term_var: self.query.vars.next_id(),
                 });
                 if self.egraph.tracing {

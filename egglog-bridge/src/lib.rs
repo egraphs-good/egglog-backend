@@ -68,6 +68,7 @@ pub struct EGraph {
     funcs: DenseIdMap<FunctionId, FunctionInfo>,
     panic_message: SideChannel<String>,
     proof_specs: DenseIdMap<ReasonSpecId, Arc<ProofReason>>,
+    return_type: DenseIdMap<ExternalFunctionId, ColumnTy>,
     /// Side tables used to store proof information. We initialize these lazily
     /// as a proof object with a given number of parameters is added.
     reason_tables: IndexMap<usize /* arity */, TableId>,
@@ -116,6 +117,7 @@ impl EGraph {
             timestamp_counter: ts_counter,
             rules: Default::default(),
             funcs: Default::default(),
+            return_type: Default::default(),
             panic_message: Default::default(),
             proof_specs: Default::default(),
             reason_tables: Default::default(),
@@ -181,14 +183,31 @@ impl EGraph {
         self.db.primitives()
     }
 
+    /// Register the given external function with thie EGraph.
+    ///
+    /// NB: This method allows users to optionally pass a return type. The status of return types
+    /// for external functions is currently experimental --- depending on the final status of
+    /// proofs, they may be removed, or they may become mandatory.
     pub fn register_external_func(
         &mut self,
         func: impl ExternalFunction + 'static,
+        return_type: Option<ColumnTy>,
     ) -> ExternalFunctionId {
-        self.db.add_external_function(func)
+        let res = self.db.add_external_function(func);
+        if let Some(return_type) = return_type {
+            self.return_type.insert(res, return_type);
+        }
+        res
+    }
+
+    /// Get the return type of the given external function, if that function exists and a return
+    /// type was specified during the corresponding call to [`EGraph::register_external_func`].
+    pub fn get_return_ty(&self, func: ExternalFunctionId) -> Option<ColumnTy> {
+        self.return_type.get(func).copied()
     }
 
     pub fn free_external_func(&mut self, func: ExternalFunctionId) {
+        self.return_type.take(func);
         self.db.free_external_function(func)
     }
 

@@ -1,5 +1,5 @@
 use anyhow::Context;
-use core_relations::{PrimitiveId, PrimitivePrinter, Value};
+use core_relations::{ExternalFunctionId, PrimitiveId, PrimitivePrinter, Value};
 use thiserror::Error;
 
 use std::{
@@ -15,7 +15,7 @@ use hashbrown::{hash_map::Entry, HashMap};
 use crate::{
     rule::Variable,
     syntax::{Binding, Entry as SyntaxEntry, Statement, TermFragment},
-    EGraph, FunctionId, Result, RuleId,
+    ColumnTy, EGraph, FunctionId, Result, RuleId,
 };
 
 #[derive(Debug)]
@@ -950,21 +950,26 @@ impl Substitution<'_> {
                         Ok(pc.interned)
                     })
                     .collect::<Result<Vec<_>>>()?;
-                let prims = self.egraph.db.primitives_mut();
-                let result = prims
-                    .apply_op(*func, &args)
+                let result = self.egraph.db.with_execution_state(|es| {
                     // This should be a pretty rare error, but if we see it
                     // often we can upgrade it to a full ProofCheckError.
                     //
                     // When primitives return None, they intend to halt
                     // execution and not match a rule.
-                    .expect("primitive functions should return a value");
-                let ret_ty = prims.get_schema(*func).ret;
+                    es.call_external_func(*func, &args)
+                        .expect("expected return value from primitive function")
+                });
+                let Some(ColumnTy::Primitive(ret_ty)) = self.egraph.get_return_ty(*func) else {
+                    return Err(ProofCheckError::IncompleteTypeInformationForPrimitive {
+                        func: *func,
+                    }
+                    .into());
+                };
 
                 let rendered = format!(
                     "{:?}",
                     PrimitivePrinter {
-                        prim: prims,
+                        prim: self.egraph.primitives(),
                         ty: ret_ty,
                         val: result,
                     }
@@ -1061,6 +1066,9 @@ pub(crate) enum ProofCheckError {
         "Rule {rule} is being used as a proof of equality when `union` is not the  target function"
     )]
     NonUnionProofOfEquality { rule: String },
+
+    #[error("failed to get type information from the primitive function {func:?}")]
+    IncompleteTypeInformationForPrimitive { func: ExternalFunctionId },
 }
 
 // Cleanups:

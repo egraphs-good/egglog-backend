@@ -1,7 +1,5 @@
 use hashbrown::HashMap;
 
-use numeric_id::NumericId;
-
 use crate::{ColumnTy, QueryEntry};
 
 use crate::{
@@ -236,10 +234,9 @@ impl ExpressionBuilder {
                 let table_info = &egraph.funcs[t];
                 table_info.ret_ty()
             }
-            Function::Prim(p) => {
-                let schema = egraph.db.primitives().get_schema(p);
-                ColumnTy::Primitive(schema.ret)
-            }
+            Function::Prim(p) => egraph
+                .get_return_ty(p)
+                .expect("macro code currently relies on return types for primitives being known"),
         }
     }
 
@@ -250,15 +247,8 @@ impl ExpressionBuilder {
                 let info = &egraph.funcs[t];
                 info.schema[col]
             }
-            Function::Prim(p) => {
-                let schema = egraph.db.primitives().get_schema(p);
-                ColumnTy::Primitive(if col.index() == schema.args.len() {
-                    schema.ret
-                } else {
-                    *schema.args.get(col.index()).unwrap_or_else(|| {
-                        panic!("Column index out of bounds for primitive function: attempted to access {col:?} but the function only has {} arguments (and one return value)", schema.args.len())
-                    })
-                })
+            Function::Prim(_) => {
+                panic!("general type inference for external functions is not supported")
             }
         }
     }

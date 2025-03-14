@@ -513,7 +513,7 @@ fn register_vec_push(egraph: &mut EGraph) -> ExternalFunctionId {
         vec.0.shrink_to_fit();
         Some(state.clone().containers().register_val(vec, state))
     });
-    egraph.register_external_func(external_func)
+    egraph.register_external_func(external_func, None)
 }
 
 fn register_vec_last(egraph: &mut EGraph) -> ExternalFunctionId {
@@ -529,7 +529,7 @@ fn register_vec_last(egraph: &mut EGraph) -> ExternalFunctionId {
             .last()
             .cloned()
     });
-    egraph.register_external_func(external_func)
+    egraph.register_external_func(external_func, None)
 }
 
 fn dump_vecs(egraph: &EGraph) -> Vec<Vec<Value>> {
@@ -592,13 +592,16 @@ fn container_test() {
         MergeFn::UnionId,
         "vec",
     );
-    let int_add = egraph.register_external_func(make_external_func(|exec_state, args| {
-        let [x, y] = args else { panic!() };
-        let x: i64 = exec_state.prims().unwrap(*x);
-        let y: i64 = exec_state.prims().unwrap(*y);
-        let z: i64 = x + y;
-        Some(exec_state.prims().get(z))
-    }));
+    let int_add = egraph.register_external_func(
+        make_external_func(|exec_state, args| {
+            let [x, y] = args else { panic!() };
+            let x: i64 = exec_state.prims().unwrap(*x);
+            let y: i64 = exec_state.prims().unwrap(*y);
+            let z: i64 = x + y;
+            Some(exec_state.prims().get(z))
+        }),
+        Some(ColumnTy::Primitive(int_prim)),
+    );
     let vec_last = register_vec_last(&mut egraph);
     let vec_push = register_vec_push(&mut egraph);
 
@@ -750,10 +753,13 @@ fn rhs_only_rule_only_runs_once() {
     let mut egraph = EGraph::default();
     let counter = Arc::new(AtomicUsize::new(0));
     let inner = counter.clone();
-    let inc_counter_func = egraph.register_external_func(make_external_func(move |_, _| {
-        inner.fetch_add(1, Ordering::SeqCst);
-        Some(Value::new(0))
-    }));
+    let inc_counter_func = egraph.register_external_func(
+        make_external_func(move |_, _| {
+            inner.fetch_add(1, Ordering::SeqCst);
+            Some(Value::new(0))
+        }),
+        None,
+    );
     let inc_counter_rule = {
         let mut rb = egraph.new_rule("", true);
         rb.call_external_func(inc_counter_func, &[], ColumnTy::Id);
@@ -772,8 +778,8 @@ fn test_mergefn_arithmetic() {
     let int_prim = egraph.primitives_mut().register_type::<i64>();
 
     // Create external functions for multiplication and addition
-    let multiply_func = egraph.register_external_func(core_relations::make_external_func(
-        |state, vals| -> Option<Value> {
+    let multiply_func = egraph.register_external_func(
+        core_relations::make_external_func(|state, vals| -> Option<Value> {
             let [a, b] = vals else {
                 return None;
             };
@@ -781,11 +787,12 @@ fn test_mergefn_arithmetic() {
             let b_val = *state.prims().unwrap_ref::<i64>(*b);
             let res = state.prims().get::<i64>(a_val * b_val);
             Some(res)
-        },
-    ));
+        }),
+        Some(ColumnTy::Primitive(int_prim)),
+    );
 
-    let add_func = egraph.register_external_func(core_relations::make_external_func(
-        |state, vals| -> Option<Value> {
+    let add_func = egraph.register_external_func(
+        core_relations::make_external_func(|state, vals| -> Option<Value> {
             let [a, b] = vals else {
                 return None;
             };
@@ -793,8 +800,9 @@ fn test_mergefn_arithmetic() {
             let b_val = *state.prims().unwrap_ref::<i64>(*b);
             let res = state.prims().get::<i64>(a_val + b_val);
             Some(res)
-        },
-    ));
+        }),
+        Some(ColumnTy::Primitive(int_prim)),
+    );
 
     let value_0 = egraph.primitives_mut().get(0i64);
     let value_1 = egraph.primitives_mut().get(1i64);
