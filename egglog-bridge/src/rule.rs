@@ -11,6 +11,7 @@ use core_relations::{
     ColumnId, Constraint, CounterId, ExternalFunctionId, PlanStrategy, PrimitivePrinter,
     QueryBuilder, RuleBuilder as CoreRuleBuilder, RuleSetBuilder, TableId, Value, WriteVal,
 };
+use hashbrown::HashSet;
 use log::debug;
 use numeric_id::{define_id, DenseIdMap, NumericId};
 use smallvec::SmallVec;
@@ -149,6 +150,7 @@ pub(crate) struct Query {
 pub struct RuleBuilder<'a> {
     egraph: &'a mut EGraph,
     proof_builder: ProofBuilder,
+    seen_prim_return_vars: HashSet<Variable>,
     query: Query,
 }
 
@@ -163,6 +165,7 @@ impl EGraph {
         RuleBuilder {
             egraph: self,
             proof_builder: ProofBuilder::new(desc, rule_id),
+            seen_prim_return_vars: Default::default(),
             query: Query {
                 uf_table,
                 id_counter,
@@ -471,11 +474,27 @@ impl RuleBuilder<'_> {
                     ));
             }
         }
+        if let QueryEntry::Var { id, .. } = entries.last().unwrap() {
+            let id = *id;
+            if self.seen_prim_return_vars.insert(id) {
+                // This is the first time we've seen this variable in a
+                // primitive context. Treat it like a call to a "lookup" on this function and don't
+                // assert it equal to anything.
+                self.query.add_rule.push(Box::new(move |inner, rb| {
+                    let mut dst_vars = inner.convert_all(&entries);
+                    dst_vars.pop();
+                    let result = rb.call_external(func, &dst_vars)?;
+                    inner.mapping.insert(id, result.into());
+                    Ok(())
+                }));
+                return Ok(());
+            }
+        }
         self.query.add_rule.push(Box::new(move |inner, rb| {
             let mut dst_vars = inner.convert_all(&entries);
             let expected = dst_vars.pop().expect("must specify a return value");
-            let var = rb.call_external(func, &dst_vars)?;
-            rb.assert_eq(var.into(), expected);
+            let result = rb.call_external(func, &dst_vars)?;
+            rb.assert_eq(result.into(), expected);
             Ok(())
         }));
         Ok(())

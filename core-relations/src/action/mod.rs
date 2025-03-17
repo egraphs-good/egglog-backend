@@ -358,7 +358,6 @@ impl ExecutionState<'_> {
         bindings: &mut Bindings,
         pool_set: &PoolSet,
     ) {
-        let todo_remove = eprintln!("running instr {inst:?} with bindings {bindings:?}");
         fn assert_impl(
             bindings: &mut Bindings,
             mask: &mut Mask,
