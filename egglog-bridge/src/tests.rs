@@ -795,7 +795,7 @@ fn rhs_only_rule_only_runs_once() {
 }
 
 #[test]
-fn test_mergefn_arithmetic() {
+fn mergefn_arithmetic() {
     let mut egraph = EGraph::default();
     let int_prim = egraph.primitives_mut().register_type::<i64>();
 
@@ -915,7 +915,7 @@ fn test_mergefn_arithmetic() {
 }
 
 #[test]
-fn test_mergefn_nested_function() {
+fn mergefn_nested_function() {
     let mut egraph = EGraph::default();
     let int_prim = egraph.primitives_mut().register_type::<i64>();
 

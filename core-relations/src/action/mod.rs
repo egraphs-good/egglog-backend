@@ -105,7 +105,9 @@ pub(crate) struct Bindings {
 impl std::ops::Index<Variable> for Bindings {
     type Output = Pooled<Vec<Value>>;
     fn index(&self, var: Variable) -> &Pooled<Vec<Value>> {
-        &self.vars[var]
+        self.vars
+            .get(var)
+            .unwrap_or_else(|| panic!("variable {var:?} not found"))
     }
 }
 
@@ -356,6 +358,7 @@ impl ExecutionState<'_> {
         bindings: &mut Bindings,
         pool_set: &PoolSet,
     ) {
+        let todo_remove = eprintln!("running instr {inst:?} with bindings {bindings:?}");
         fn assert_impl(
             bindings: &mut Bindings,
             mask: &mut Mask,
