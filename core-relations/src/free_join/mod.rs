@@ -208,12 +208,12 @@ impl Clone for Counters {
 
 impl Counters {
     pub(crate) fn read(&self, ctr: CounterId) -> usize {
-        self.0[ctr].load(Ordering::SeqCst)
+        self.0[ctr].load(Ordering::Acquire)
     }
     pub(crate) fn inc(&self, ctr: CounterId) -> usize {
         // We synchronize with `read_counter` but not with other increments.
         // NB: we may want to experiment with Ordering::Relaxed here.
-        self.0[ctr].fetch_add(1, Ordering::SeqCst)
+        self.0[ctr].fetch_add(1, Ordering::Release)
     }
 }
 
@@ -301,16 +301,15 @@ impl Database {
         next_ts: Value,
     ) -> bool {
         fn do_parallel() -> bool {
-            false
-            // #[cfg(test)]
-            // {
-            //     use rand::Rng;
-            //     rand::thread_rng().gen_bool(0.5)
-            // }
-            // #[cfg(not(test))]
-            // {
-            //     rayon::current_num_threads() > 1
-            // }
+            #[cfg(test)]
+            {
+                use rand::Rng;
+                rand::thread_rng().gen_bool(0.5)
+            }
+            #[cfg(not(test))]
+            {
+                rayon::current_num_threads() > 1
+            }
         }
 
         let func = self.tables.take(func_id).unwrap();
