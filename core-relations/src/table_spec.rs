@@ -12,6 +12,7 @@ use std::{
 };
 
 use numeric_id::{define_id, DenseIdMap, NumericId};
+use once_cell::sync::{Lazy, OnceCell};
 use smallvec::SmallVec;
 
 use crate::{
@@ -24,7 +25,7 @@ use crate::{
     offsets::{RowId, Subset, SubsetRef},
     pool::{with_pool_set, PoolSet, Pooled},
     row_buffer::{RowBuffer, TaggedRowBuffer},
-    QueryEntry, TableId, Variable,
+    OffsetRange, QueryEntry, TableId, Variable,
 };
 
 define_id!(pub ColumnId, u32, "a particular column in a table");
@@ -362,6 +363,35 @@ impl<T: Table> TableWrapper for WrapperImpl<T> {
         table.scan_generic(subset, |row_id, row| {
             res.add_row(&[row[col.index()]], row_id);
         });
+        let todo_revert = 1;
+        if col.index() == 2
+            && subset == SubsetRef::Dense(OffsetRange::new(RowId::new(1445), RowId::new(1762)))
+        {
+            use crate::table::CanonicalTable;
+            static SNAPSHOT: OnceCell<CanonicalTable> = OnceCell::new();
+            let swt = table
+                .as_any()
+                .downcast_ref::<crate::SortedWritesTable>()
+                .unwrap();
+            let (hash, dump) = res.dump();
+            if dump.len() == 2
+                && dump.keys().copied().collect::<Vec<_>>() == vec![Value::new(9), Value::new(12)]
+            {
+                let canon_snapshot = SNAPSHOT.get_or_init(|| CanonicalTable::new(swt));
+                let mut diff = canon_snapshot.dump_diff(&CanonicalTable::new(swt));
+                let mut off = std::cmp::min(diff.len(), 2048);
+                while off > 0 && !diff.is_char_boundary(off) {
+                    off -= 1;
+                }
+                if !diff.split_off(off).is_empty() {
+                    diff.push_str("...");
+                }
+                eprintln!(
+                    "just got a dump from a table, subset={subset:?}, version={:?}, hash={hash}, diff={diff}",
+                    table.version(),
+                );
+            }
+        }
         res
     }
     fn group_by_key(&self, table: &dyn Table, subset: SubsetRef, cols: &[ColumnId]) -> TupleIndex {

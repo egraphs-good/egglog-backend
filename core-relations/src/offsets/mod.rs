@@ -212,7 +212,7 @@ impl Offsets for &'_ SortedOffsetSlice {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum SubsetRef<'a> {
     Dense(OffsetRange),
     Sparse(&'a SortedOffsetSlice),

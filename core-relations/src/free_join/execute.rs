@@ -169,16 +169,18 @@ impl Database {
     }
     pub fn run_rule_set(&mut self, rule_set: &RuleSet) -> bool {
         fn do_parallel() -> bool {
-            #[cfg(debug_assertions)]
-            {
-                use rand::Rng;
-                rand::thread_rng().gen_bool(0.5)
-            }
+            let todo_revert = 1;
+            false
+            // #[cfg(debug_assertions)]
+            // {
+            //     use rand::Rng;
+            //     rand::thread_rng().gen_bool(0.5)
+            // }
 
-            #[cfg(not(debug_assertions))]
-            {
-                rayon::current_num_threads() > 1
-            }
+            // #[cfg(not(debug_assertions))]
+            // {
+            //     rayon::current_num_threads() > 1
+            // }
         }
         if rule_set.plans.is_empty() {
             return false;
@@ -314,10 +316,19 @@ impl<'a> JoinState<'a> {
                 // NB: we could use the raw api here to avoid cloning the subset
                 // on a cache hit.
                 let entry = self.index_cache.entry((cols[0], subset.clone()));
-                entry
+                let cached = entry
                     .or_insert_with(|| Arc::new(info.table.group_by_col(subset.as_ref(), cols[0])))
                     .value()
-                    .clone()
+                    .clone();
+                let todo_revert = 1;
+                let uncached = Arc::new(info.table.group_by_col(subset.as_ref(), cols[0]));
+                if let Some(diff) = cached.dump_diff(&uncached) {
+                    panic!(
+                        "index cache mismatch for index on {cols:?} on table {:?}:\n{diff}",
+                        plan.atoms[atom].table
+                    );
+                }
+                cached
             } else {
                 Arc::new(info.table.group_by_col(subset.as_ref(), cols[0]))
             })

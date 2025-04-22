@@ -7,10 +7,11 @@
 use std::{
     any::Any,
     cmp,
+    collections::BTreeMap,
     hash::Hasher,
     mem,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Weak,
     },
 };
@@ -156,6 +157,7 @@ pub struct SortedWritesTable {
     rebuild_index: Index<ColumnIndex>,
     // Used to manage incremental rebuilds.
     subset_tracker: SubsetTracker,
+    print_stuff: AtomicBool,
 }
 
 impl Clone for SortedWritesTable {
@@ -173,6 +175,7 @@ impl Clone for SortedWritesTable {
             to_rebuild: self.to_rebuild.clone(),
             rebuild_index: Index::new(self.to_rebuild.clone(), ColumnIndex::new()),
             subset_tracker: Default::default(),
+            print_stuff: AtomicBool::new(false),
         }
     }
 }
@@ -327,6 +330,9 @@ impl Table for SortedWritesTable {
         next_ts: Value,
         exec_state: &mut ExecutionState,
     ) {
+        if self.print_stuff.load(Ordering::Acquire) {
+            println!("rebuilddddd!");
+        }
         self.do_rebuild(table_id, table, next_ts, exec_state);
     }
 
@@ -338,6 +344,9 @@ impl Table for SortedWritesTable {
     }
 
     fn updates_since(&self, gen: Offset) -> Subset {
+        if self.print_stuff.load(Ordering::Acquire) {
+            println!("updates_since!");
+        }
         Subset::Dense(OffsetRange::new(
             RowId::from_usize(gen.index()),
             self.data.next_row(),
@@ -356,10 +365,22 @@ impl Table for SortedWritesTable {
     where
         Self: Sized,
     {
+        if self.print_stuff.load(Ordering::Acquire) {
+            println!(
+                "scan_generic! stale={}, next_row={:?}, ptr={:x}",
+                self.data.stale_rows,
+                self.data.next_row(),
+                self as *const _ as usize,
+            );
+        }
         let Some((_low, hi)) = subset.bounds() else {
             // Empty subset
             return;
         };
+        let todo_revert = 1;
+        if _low.rep() == 1445 && hi.rep() == 1762 {
+            self.print_stuff.store(true, Ordering::Release);
+        }
         assert!(
             hi.index() <= self.data.data.len(),
             "{} vs. {}",
@@ -386,6 +407,13 @@ impl Table for SortedWritesTable {
     where
         Self: Sized,
     {
+        let todo_revert = 1;
+        if let Some((_low, hi)) = subset.bounds() {
+            if _low.rep() == 1445 && hi.rep() == 1762 {
+                self.print_stuff.store(true, Ordering::Release);
+            }
+        };
+
         if cs.is_empty() {
             subset
                 .iter_bounded(start.index(), start.index() + n, |row| {
@@ -408,6 +436,9 @@ impl Table for SortedWritesTable {
     }
 
     fn fast_subset(&self, constraint: &Constraint) -> Option<Subset> {
+        if self.print_stuff.load(Ordering::Acquire) {
+            println!("fast_subset!");
+        }
         let sort_by = self.sort_by?;
         match constraint {
             Constraint::Eq { .. } => None,
@@ -477,6 +508,9 @@ impl Table for SortedWritesTable {
     }
 
     fn refine_one(&self, mut subset: Subset, c: &Constraint) -> Subset {
+        if self.print_stuff.load(Ordering::Acquire) {
+            println!("refine_one!");
+        }
         // NB: we aren't using any of the `fast_subset` tricks here. We may want
         // to if the higher-level implementations end up using it directly.
         subset.retain(|row| self.eval(std::slice::from_ref(c), row));
@@ -496,6 +530,9 @@ impl Table for SortedWritesTable {
     }
 
     fn merge(&mut self, exec_state: &mut ExecutionState) -> bool {
+        if self.print_stuff.load(Ordering::Acquire) {
+            println!("merging!");
+        }
         let mut changed = false;
         changed |= self.do_delete();
         changed |= self.do_insert(exec_state);
@@ -504,6 +541,9 @@ impl Table for SortedWritesTable {
     }
 
     fn get_row(&self, key: &[Value]) -> Option<Row> {
+        // if self.print_stuff.load(Ordering::Acquire) {
+        //     println!("get_row!");
+        // }
         let id = get_entry(key, self.n_keys, &self.hash, |row| {
             &self.data.get_row(row).unwrap()[0..self.n_keys] == key
         })?;
@@ -513,6 +553,9 @@ impl Table for SortedWritesTable {
     }
 
     fn get_row_column(&self, key: &[Value], col: ColumnId) -> Option<Value> {
+        // if self.print_stuff.load(Ordering::Acquire) {
+        //     println!("get_row_column!");
+        // }
         let id = get_entry(key, self.n_keys, &self.hash, |row| {
             &self.data.get_row(row).unwrap()[0..self.n_keys] == key
         })?;
@@ -555,6 +598,43 @@ impl SortedWritesTable {
             to_rebuild,
             rebuild_index,
             subset_tracker: Default::default(),
+            print_stuff: AtomicBool::new(false),
+        }
+    }
+
+    fn validate_rows(&self) {
+        let Some(sort_col) = self.sort_by else {
+            return;
+        };
+        for elts in self.offsets.windows(2) {
+            let [first, second] = elts else {
+                unreachable!()
+            };
+            for row in first.1.index()..second.1.index() {
+                let Some(vals) = self.data.get_row(RowId::from_usize(row)) else {
+                    continue;
+                };
+                let sort_val = vals[sort_col.index()];
+                assert_eq!(
+                    sort_val, first.0,
+                    "offsets is {:?}, but at row {row:?} we have {sort_val:?}",
+                    elts
+                );
+            }
+        }
+        let Some((last_val, last_row)) = self.offsets.last() else {
+            return;
+        };
+        for row in last_row.index()..self.data.next_row().index() {
+            let Some(vals) = self.data.get_row(RowId::from_usize(row)) else {
+                continue;
+            };
+            let sort_val = vals[sort_col.index()];
+            assert_eq!(
+                sort_val, *last_val,
+                "offsets is {:?}, but at row {row:?} we have {sort_val:?}",
+                self.offsets
+            );
         }
     }
 
@@ -637,32 +717,69 @@ impl SortedWritesTable {
     fn do_delete(&mut self) -> bool {
         let total = self.pending_state.total_removals.swap(0, Ordering::Relaxed);
 
-        if do_parallel(total) {
-            self.parallel_delete()
-        } else {
-            self.serial_delete()
-        }
+        let todo_revert = 1;
+        self.serial_delete()
+
+        // if do_parallel(total) {
+        //     self.parallel_delete()
+        // } else {
+        //     self.serial_delete()
+        // }
     }
 
     fn do_insert(&mut self, exec_state: &mut ExecutionState) -> bool {
         let total = self.pending_state.total_rows.swap(0, Ordering::Relaxed);
         self.data.data.reserve(total);
-        if do_parallel(total) {
-            if let Some(col) = self.sort_by {
-                self.parallel_insert(
-                    exec_state,
-                    SortChecker {
-                        col,
-                        current: None,
-                        baseline: self.offsets.last().map(|(v, _)| *v),
-                    },
-                )
-            } else {
-                self.parallel_insert(exec_state, ())
-            }
+
+        let todo_revert = 1;
+
+        let (serial_canon, serial_copy, changed) = {
+            let mut copy = self.clone();
+            let changed = copy.serial_insert(exec_state);
+            copy.validate_rows();
+            (CanonicalTable::new(&copy), copy, changed)
+        };
+
+        let parallel_changed = if let Some(col) = self.sort_by {
+            self.parallel_insert(
+                exec_state,
+                SortChecker {
+                    col,
+                    current: None,
+                    baseline: self.offsets.last().map(|(v, _)| *v),
+                },
+            )
         } else {
-            self.serial_insert(exec_state)
+            self.parallel_insert(exec_state, ())
+        };
+        self.validate_rows();
+
+        let parallel_canon = CanonicalTable::new(self);
+        if changed != parallel_changed || serial_canon != parallel_canon {
+            panic!("while inserting {total} rows, parallel and serial insertions are not equivalent {parallel_changed} vs. {changed}, sort_col={:?}: {}", 
+                self.sort_by, parallel_canon.dump_diff(&serial_canon));
         }
+        assert_eq!(serial_copy.offsets, self.offsets);
+        assert_eq!(serial_copy.generation, self.generation);
+        assert_eq!(serial_copy.to_rebuild, self.to_rebuild);
+        // *self = serial_copy; fixes the test!!
+        parallel_changed
+        // if do_parallel(total) {
+        //     if let Some(col) = self.sort_by {
+        //         self.parallel_insert(
+        //             exec_state,
+        //             SortChecker {
+        //                 col,
+        //                 current: None,
+        //                 baseline: self.offsets.last().map(|(v, _)| *v),
+        //             },
+        //         )
+        //     } else {
+        //         self.parallel_insert(exec_state, ())
+        //     }
+        // } else {
+        //     self.serial_insert(exec_state)
+        // }
     }
 
     fn serial_insert(&mut self, exec_state: &mut ExecutionState) -> bool {
@@ -829,7 +946,6 @@ impl SortedWritesTable {
                         for row in staged.rows() {
                             use hashbrown::hash_table::Entry;
                             checker.check_local(row);
-                            changed = true;
                             let key = &row[0..n_keys];
                             let (_actual_shard, hc) = hash_code(shard_data, row, n_keys);
                             #[cfg(any(debug_assertions, test))]
@@ -861,6 +977,7 @@ impl SortedWritesTable {
                                     // exclusive access to any row whose hash matches this
                                     // shard.
                                     if (self.merge)(&mut exec_state, cur, row, &mut scratch) {
+                                        changed = true;
                                         unsafe {
                                             let _was_stale = read_handle.set_stale_shared(occ.get().row);
                                             debug_assert!(!_was_stale);
@@ -877,6 +994,7 @@ impl SortedWritesTable {
                                     scratch.clear();
                                 }
                                 Entry::Vacant(v) => {
+                                    changed = true;
                                     v.insert(TableEntry {
                                         hashcode: hc as HashCode,
                                         row: cur_row,
@@ -886,7 +1004,7 @@ impl SortedWritesTable {
 
                             cur_row = cur_row.inc();
                         }
-                        changed |= staged.changed;
+                        // changed |= staged.changed;
                         staged.clear();
                     }};
                 }
@@ -989,13 +1107,15 @@ impl SortedWritesTable {
         if self.data.stale_rows <= cmp::max(16, self.data.data.len() / 2) {
             return;
         }
+        let todo_revert = 1;
+        self.rehash();
 
         // The '* 4' biases the heuristic towards background evaluation.
-        if do_parallel(self.data.data.len() * 4) {
-            self.parallel_rehash();
-        } else {
-            self.rehash();
-        }
+        // if do_parallel(self.data.data.len() * 4) {
+        //     self.parallel_rehash();
+        // } else {
+        //     self.rehash();
+        // }
     }
     fn parallel_rehash(&mut self) {
         use rayon::prelude::*;
@@ -1548,5 +1668,59 @@ impl<I: Iterator> Iterator for WithExactSize<I> {
 impl<I: Iterator> ExactSizeIterator for WithExactSize<I> {
     fn len(&self) -> usize {
         self.size
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CanonicalTable {
+    data: BTreeMap<Vec<Value>, Vec<Value>>,
+}
+
+impl CanonicalTable {
+    pub(crate) fn new(table: &SortedWritesTable) -> Self {
+        let mut data = BTreeMap::new();
+        for row in table.data.data.non_stale() {
+            let key = row[0..table.n_keys].to_vec();
+            let value = row[table.n_keys..].to_vec();
+            // Confirm that the row is mapped correctly
+            let row2 = table.get_row(&key).expect("row should be in table");
+            data.insert(key, value);
+            assert_eq!(row, &*row2.vals);
+        }
+        CanonicalTable { data }
+    }
+
+    pub(crate) fn dump_diff(&self, other: &CanonicalTable) -> String {
+        if self.data == other.data {
+            return "no differences".to_string();
+        }
+        use std::io::Write;
+        let mut buf = Vec::new();
+        writeln!(buf, "rows in left but not right:").unwrap();
+
+        let todo_differences_in_common_mappings = 1;
+
+        for (key, val) in self.data.iter() {
+            if !other.data.contains_key(key) {
+                writeln!(buf, "{:?} => {:?}", key, val).unwrap();
+            }
+        }
+        writeln!(buf, "\nrows in right but not left:").unwrap();
+
+        for (key, val) in other.data.iter() {
+            if !self.data.contains_key(key) {
+                writeln!(buf, "{:?} => {:?}", key, val).unwrap();
+            }
+        }
+        writeln!(buf, "\ncommon keys that differ:").unwrap();
+        for (key, val) in self.data.iter() {
+            if let Some(v2) = other.data.get(key) {
+                if val != v2 {
+                    writeln!(buf, "{:?} => {:?} != {:?}", key, val, v2).unwrap();
+                }
+            }
+        }
+
+        String::from_utf8_lossy(&buf).to_string()
     }
 }

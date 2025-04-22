@@ -982,7 +982,10 @@ impl MergeFn {
             UnionId if !egraph.tracing => {
                 write_deps.insert(egraph.uf_table);
             }
-            UnionId | AssertEq | Old | New | Const(..) => {}
+            AssertEq => {
+                read_deps.insert(egraph.uf_table);
+            }
+            UnionId | Old | New | Const(..) => {}
         }
     }
 
@@ -1043,6 +1046,7 @@ impl MergeFn {
             MergeFn::Old => ResolvedMergeFn::Old,
             MergeFn::New => ResolvedMergeFn::New,
             MergeFn::AssertEq => ResolvedMergeFn::AssertEq {
+                uf_table: egraph.uf_table,
                 panic: egraph.new_panic(format!(
                     "Illegal merge attempted for function {function_name}"
                 )),
@@ -1098,6 +1102,7 @@ enum ResolvedMergeFn {
     Old,
     New,
     AssertEq {
+        uf_table: TableId,
         panic: ExternalFunctionId,
     },
     UnionId {
@@ -1122,10 +1127,24 @@ impl ResolvedMergeFn {
             ResolvedMergeFn::Const(v) => *v,
             ResolvedMergeFn::Old => cur,
             ResolvedMergeFn::New => new,
-            ResolvedMergeFn::AssertEq { panic } => {
-                if cur != new {
+            ResolvedMergeFn::AssertEq { uf_table, panic } => {
+                let uf_table = state.get_table(*uf_table);
+                let cur_canon = uf_table
+                    .get_row(&[cur])
+                    .map(|row| row.vals[1])
+                    .unwrap_or(cur);
+                let new_canon = uf_table
+                    .get_row(&[new])
+                    .map(|row| row.vals[1])
+                    .unwrap_or(new);
+                if cur_canon != new_canon {
+                    let todo_remove = eprintln!(
+                        "panicking! {cur:?} != {new:?} (canons: {cur_canon:?} != {new_canon:?})"
+                    );
                     let res = state.call_external_func(*panic, &[]);
                     assert_eq!(res, None);
+                } else if cur != new {
+                    let todo_remove = eprintln!("saved some!");
                 }
                 cur
             }

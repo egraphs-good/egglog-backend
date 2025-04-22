@@ -330,15 +330,17 @@ impl Database {
         next_ts: Value,
     ) -> bool {
         fn do_parallel() -> bool {
-            #[cfg(test)]
-            {
-                use rand::Rng;
-                rand::thread_rng().gen_bool(0.5)
-            }
-            #[cfg(not(test))]
-            {
-                rayon::current_num_threads() > 1
-            }
+            let todo_remove = 1;
+            false
+            //#[cfg(test)]
+            //{
+            //    use rand::Rng;
+            //    rand::thread_rng().gen_bool(0.5)
+            //}
+            //#[cfg(not(test))]
+            //{
+            //    rayon::current_num_threads() > 1
+            //}
         }
 
         let func = self.tables.take(func_id).unwrap();
@@ -431,7 +433,8 @@ impl Database {
     /// Useful for out-of-band insertions into the database.
     pub fn merge_all(&mut self) -> bool {
         let mut ever_changed = false;
-        let do_parallel = rayon::current_num_threads() > 1;
+        let todo_revert = 1;
+        let do_parallel = false && rayon::current_num_threads() > 1;
         loop {
             let mut changed = false;
             let predicted = with_pool_set(|ps| ps.get::<PredictedVals>());
@@ -474,7 +477,7 @@ impl Database {
                 } else {
                     tables_merging
                         .iter_mut()
-                        .map(|(_, (info, buffers))| {
+                        .map(|(table_id, (info, buffers))| {
                             let mut es = ExecutionState::new(&predicted, db, mem::take(buffers));
                             info.as_mut().unwrap().table.merge(&mut es) || es.changed
                         })

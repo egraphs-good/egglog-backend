@@ -36,7 +36,7 @@ enum RuleBuilderError {
     ArityMismatch { expected: usize, got: usize },
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct VarInfo {
     ty: ColumnTy,
     /// If there is a "term-level" variant of this variable bound elsewhere, it
@@ -146,6 +146,19 @@ pub(crate) struct Query {
     sole_focus: Option<usize>,
     seminaive: bool,
     plan_strategy: PlanStrategy,
+}
+
+impl std::fmt::Debug for Query {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Query")
+            .field("uf_table", &self.uf_table)
+            .field("id_counter", &self.id_counter)
+            .field("tracing", &self.tracing)
+            .field("rule_id", &self.rule_id)
+            .field("vars", &self.vars)
+            .field("atoms", &self.atoms)
+            .finish()
+    }
 }
 
 pub struct RuleBuilder<'a> {

@@ -1,6 +1,8 @@
 //! Hash-based secondary indexes.
 use std::{
+    collections::BTreeMap,
     hash::{Hash, Hasher},
+    io::Write,
     mem,
     sync::Mutex,
 };
@@ -292,6 +294,63 @@ impl ColumnIndex {
             });
             ColumnIndex { shard_data, shards }
         })
+    }
+
+    pub(crate) fn dump_diff(&self, other: &ColumnIndex) -> Option<String> {
+        let (hl, l) = self.dump();
+        let (hr, r) = other.dump();
+        if l == r {
+            return None;
+        }
+        let mut res = Vec::new();
+        writeln!(
+            &mut res,
+            "lhs has {} elements, rhs has {}, hashes {hl} vs. {hr}",
+            l.len(),
+            r.len()
+        )
+        .unwrap();
+        for (key, subset) in l.iter() {
+            if let Some(other_subset) = r.get(key) {
+                if subset != other_subset {
+                    writeln!(
+                        &mut res,
+                        "key {key:?} has different values: {subset:?} != {other_subset:?}"
+                    )
+                    .unwrap();
+                }
+            } else {
+                writeln!(
+                    &mut res,
+                    "key {key:?} is missing in the rhs (subset={subset:?})"
+                )
+                .unwrap();
+            }
+        }
+        for (key, subset) in r.iter() {
+            if !l.contains_key(key) {
+                writeln!(
+                    &mut res,
+                    "key {key:?} is missing in the lhs (subset={subset:?})"
+                )
+                .unwrap();
+            }
+        }
+        Some(std::str::from_utf8(&res).unwrap().to_string())
+    }
+
+    pub(crate) fn dump(&self) -> (u64, BTreeMap<Value, Subset>) {
+        let mut res = BTreeMap::new();
+        for (_, shard) in self.shards.iter() {
+            for (key, subset) in shard.table.iter() {
+                let subset =
+                    with_pool_set(|ps| subset.as_ref(&shard.subsets).to_owned(&ps.get_pool()));
+                res.insert(*key, subset);
+            }
+        }
+        let mut hasher = FxHasher::default();
+        res.hash(&mut hasher);
+        (hasher.finish(), res)
     }
 }
 
@@ -663,15 +722,17 @@ fn num_shards() -> usize {
 }
 
 fn do_parallel(_workload_size: usize) -> bool {
-    #[cfg(test)]
-    {
-        use rand::Rng;
-        rand::thread_rng().gen::<bool>()
-    }
-    #[cfg(not(test))]
-    {
-        rayon::current_num_threads() > 1 && _workload_size > 20_000
-    }
+    let todo_remove = 1;
+    false
+    // #[cfg(test)]
+    // {
+    //     use rand::Rng;
+    //     rand::thread_rng().gen::<bool>()
+    // }
+    // #[cfg(not(test))]
+    // {
+    //     rayon::current_num_threads() > 1 && _workload_size > 20_000
+    // }
 }
 
 /// A thread pool specifically for parallel hash index construction.
