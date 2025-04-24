@@ -150,7 +150,7 @@ impl Bindings {
         self.assert_invariant();
     }
 
-    fn take(&mut self, var: Variable) -> Option<Pooled<Vec<Value>>> {
+    pub(crate) fn take(&mut self, var: Variable) -> Option<Pooled<Vec<Value>>> {
         self.vars.take(var)
     }
 }
@@ -512,6 +512,43 @@ impl ExecutionState<'_> {
                 let table = &self.db.table_info[*table].table;
                 table.lookup_row_vectorized(mask, bindings, args, *dst_col, *dst_var);
             }
+
+            Instr::LookupWithFallback {
+                table: table_id,
+                table_key,
+                func,
+                func_args,
+                dst_col,
+                dst_var,
+            } => {
+                let table = &self.db.table_info[*table_id].table;
+                let mut lookup_result = mask.clone();
+                table.lookup_row_vectorized(
+                    &mut lookup_result,
+                    bindings,
+                    table_key,
+                    *dst_col,
+                    *dst_var,
+                );
+                let mut to_call_func = lookup_result.clone();
+                to_call_func.symmetric_difference(mask);
+                if to_call_func.is_empty() {
+                    return;
+                }
+
+                // Call the given external function on all entries where the lookup failed.
+                self.db.external_funcs[*func].invoke_batch_assign(
+                    self,
+                    &mut to_call_func,
+                    bindings,
+                    func_args,
+                    *dst_var,
+                );
+                // The new mask should be the lanes where the lookup succeeded or where `func`
+                // succeeded.
+                lookup_result.union(&to_call_func);
+                *mask = lookup_result;
+            }
             Instr::Insert { table, vals } => {
                 let pool = pool_set.get_pool::<Vec<Value>>().clone();
                 iter_entries!(pool, vals).for_each(|vals| {
@@ -554,6 +591,38 @@ impl ExecutionState<'_> {
             }
             Instr::External { func, args, dst } => {
                 self.db.external_funcs[*func].invoke_batch(self, mask, bindings, args, *dst);
+            }
+            Instr::ExternalWithFallback {
+                f1,
+                args1,
+                f2,
+                args2,
+                dst,
+            } => {
+                let mut f1_result = mask.clone();
+                self.db.external_funcs[*f1].invoke_batch(
+                    self,
+                    &mut f1_result,
+                    bindings,
+                    args1,
+                    *dst,
+                );
+                let mut to_call_f2 = f1_result.clone();
+                to_call_f2.symmetric_difference(mask);
+                if to_call_f2.is_empty() {
+                    return;
+                }
+                // Call the given external function on all entries where the first call failed.
+                self.db.external_funcs[*f2].invoke_batch_assign(
+                    self,
+                    &mut to_call_f2,
+                    bindings,
+                    args2,
+                    *dst,
+                );
+                // The new mask should be the lanes where either `f1` or `f2` succeeded.
+                f1_result.union(&to_call_f2);
+                *mask = f1_result;
             }
             Instr::AssertAnyNe { ops, divider } => {
                 let pool = pool_set.get_pool::<Vec<Value>>().clone();
@@ -601,6 +670,19 @@ pub(crate) enum Instr {
         dst_var: Variable,
     },
 
+    /// Look up the given key in the table: if the value is not present in the given table, then
+    /// call the given external function with the given arguments. If the external function returns
+    /// a value, that value is returned in the given `dst_var`. If the lookup fails and the
+    /// external function does not return a value, then execution is halted.
+    LookupWithFallback {
+        table: TableId,
+        table_key: Vec<QueryEntry>,
+        func: ExternalFunctionId,
+        func_args: Vec<QueryEntry>,
+        dst_col: ColumnId,
+        dst_var: Variable,
+    },
+
     /// Insert the given return value value with the provided arguments into the
     /// table.
     Insert {
@@ -626,6 +708,17 @@ pub(crate) enum Instr {
     External {
         func: ExternalFunctionId,
         args: Vec<QueryEntry>,
+        dst: Variable,
+    },
+
+    /// Bind the result of the external function to a variable. If the first external function
+    /// fails, then use the second external function. If both fail, execution is haulted, (as in a
+    /// single failure of `External`).
+    ExternalWithFallback {
+        f1: ExternalFunctionId,
+        args1: Vec<QueryEntry>,
+        f2: ExternalFunctionId,
+        args2: Vec<QueryEntry>,
         dst: Variable,
     },
 

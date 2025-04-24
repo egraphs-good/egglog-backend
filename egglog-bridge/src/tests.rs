@@ -637,9 +637,11 @@ fn container_test() {
         let mut rb = egraph.new_rule("", true);
         let vec = rb.new_var(ColumnTy::Id);
         let vec_id = rb.new_var(ColumnTy::Id);
+        let last = rb.new_var(ColumnTy::Id);
         rb.query_table(vec_table, &[vec.into(), vec_id.into()], Some(false))
             .unwrap();
-        let last = rb.call_external_func(vec_last, &[vec.into()], ColumnTy::Id);
+        rb.query_prim(vec_last, &[vec.into(), last.into()], ColumnTy::Id)
+            .unwrap();
         let add_last_0 = rb.lookup(
             add_table,
             &[
@@ -649,6 +651,7 @@ fn container_test() {
                     ty: ColumnTy::Primitive(int_prim),
                 },
             ],
+            || "add_last_0".to_string(),
         );
         let add_0_last = rb.lookup(
             add_table,
@@ -659,13 +662,14 @@ fn container_test() {
                 },
                 last.into(),
             ],
+            || "add_0_last".to_string(),
         );
         let new_vec_1 =
-            rb.call_external_func(vec_push, &[vec.into(), add_last_0.into()], ColumnTy::Id);
+            rb.call_external_func(vec_push, &[vec.into(), add_last_0.into()], ColumnTy::Id, "");
         let new_vec_2 =
-            rb.call_external_func(vec_push, &[vec.into(), add_0_last.into()], ColumnTy::Id);
-        rb.lookup(vec_table, &[new_vec_1.into()]);
-        rb.lookup(vec_table, &[new_vec_2.into()]);
+            rb.call_external_func(vec_push, &[vec.into(), add_0_last.into()], ColumnTy::Id, "");
+        rb.lookup(vec_table, &[new_vec_1.into()], String::new);
+        rb.lookup(vec_table, &[new_vec_2.into()], String::new);
         rb.build()
     };
 
@@ -690,8 +694,9 @@ fn container_test() {
             int_add,
             &[lhs_raw.into(), rhs_raw.into()],
             ColumnTy::Primitive(int_prim),
+            "",
         );
-        let boxed = rb.lookup(num_table, &[evaled.into()]);
+        let boxed = rb.lookup(num_table, &[evaled.into()], String::new);
         rb.union(add_id.into(), boxed.into());
         rb.build()
     };
@@ -759,8 +764,8 @@ fn rhs_only_rule() {
         let zero = egraph.primitive_constant(0i64);
         let one = egraph.primitive_constant(1i64);
         let mut rb = egraph.new_rule("", true);
-        let _zero_id = rb.lookup(num_table, &[zero]);
-        let _one_id = rb.lookup(num_table, &[one]);
+        let _zero_id = rb.lookup(num_table, &[zero], String::new);
+        let _one_id = rb.lookup(num_table, &[one], String::new);
         rb.build()
     };
 
@@ -790,7 +795,7 @@ fn rhs_only_rule_only_runs_once() {
     }));
     let inc_counter_rule = {
         let mut rb = egraph.new_rule("", true);
-        rb.call_external_func(inc_counter_func, &[], ColumnTy::Id);
+        rb.call_external_func(inc_counter_func, &[], ColumnTy::Id, "");
         rb.build()
     };
 
@@ -959,8 +964,8 @@ fn mergefn_nested_function() {
 
     let write_rule = {
         let mut rb = egraph.new_rule("write_rule", true);
-        rb.lookup(f_table, &[value_1.clone()]);
-        rb.lookup(f_table, &[value_2]);
+        rb.lookup(f_table, &[value_1.clone()], String::new);
+        rb.lookup(f_table, &[value_2], String::new);
         rb.build()
     };
 
@@ -1076,9 +1081,9 @@ fn constrain_prims_simple() {
     let value_true = egraph.primitive_constant(true);
     let write_f = {
         let mut rb = egraph.new_rule("write_f", true);
-        rb.lookup(f_table, &[value_1.clone()]);
-        rb.lookup(f_table, &[value_2.clone()]);
-        rb.lookup(f_table, &[value_3.clone()]);
+        rb.lookup(f_table, &[value_1.clone()], String::new);
+        rb.lookup(f_table, &[value_2.clone()], String::new);
+        rb.lookup(f_table, &[value_3.clone()], String::new);
         rb.build()
     };
 
@@ -1162,9 +1167,9 @@ fn constrain_prims_abstract() {
     let value_1 = egraph.primitive_constant(1i64);
     let write_f = {
         let mut rb = egraph.new_rule("write_f", true);
-        rb.lookup(f_table, &[value_n1.clone()]);
-        rb.lookup(f_table, &[value_0.clone()]);
-        rb.lookup(f_table, &[value_1.clone()]);
+        rb.lookup(f_table, &[value_n1.clone()], String::new);
+        rb.lookup(f_table, &[value_0.clone()], String::new);
+        rb.lookup(f_table, &[value_1.clone()], String::new);
         rb.build()
     };
 
@@ -1236,8 +1241,8 @@ fn basic_subsumption() {
     let value_3 = egraph.primitive_constant(3i64);
     let write_f = {
         let mut rb = egraph.new_rule("write_f", true);
-        rb.lookup(f_table, &[value_1.clone()]);
-        rb.lookup(f_table, &[value_2.clone()]);
+        rb.lookup(f_table, &[value_1.clone()], String::new);
+        rb.lookup(f_table, &[value_2.clone()], String::new);
         rb.build()
     };
 
@@ -1280,6 +1285,91 @@ fn basic_subsumption() {
     let g = get_entries(&egraph, g_table);
     assert_eq!(g.len(), 1);
     assert_eq!(g[0], f[0])
+}
+
+#[test]
+fn lookup_failure_panics() {
+    let mut egraph = EGraph::default();
+    let f = egraph.add_table(FunctionConfig {
+        schema: vec![ColumnTy::Id, ColumnTy::Id],
+        default: DefaultVal::Fail,
+        merge: MergeFn::UnionId,
+        name: "test".into(),
+        can_subsume: false,
+    });
+
+    let to_entry = |val: u32| QueryEntry::Const {
+        val: Value::new(val),
+        ty: ColumnTy::Id,
+    };
+
+    let value_1 = to_entry(1);
+    let value_2 = to_entry(2);
+    let value_3 = to_entry(3);
+    let write_f = {
+        let mut rb = egraph.new_rule("write_f", true);
+        rb.set(f, &[value_1.clone(), value_1.clone()]);
+        rb.set(f, &[value_2.clone(), value_2.clone()]);
+        rb.build()
+    };
+    egraph.run_rules(&[write_f]).unwrap();
+
+    let lookup_success = {
+        let mut rb = egraph.new_rule("lookup_success", true);
+        rb.lookup(f, &[value_1.clone()], String::new);
+        rb.build()
+    };
+    egraph.run_rules(&[lookup_success]).unwrap();
+
+    let lookup_failure = {
+        let mut rb = egraph.new_rule("lookup_fail", true);
+        rb.lookup(f, &[value_3.clone()], String::new);
+        rb.build()
+    };
+    egraph.run_rules(&[lookup_failure]).err().unwrap();
+}
+
+#[test]
+fn primitive_failure_panics() {
+    let mut egraph = EGraph::default();
+    let _int_prim = egraph.primitives_mut().register_type::<i64>();
+    let unit_prim = egraph.primitives_mut().register_type::<()>();
+
+    let value_1 = egraph.primitive_constant(1i64);
+    let value_2 = egraph.primitive_constant(2i64);
+
+    let assert_odd = egraph.register_external_func(core_relations::make_external_func(
+        |state, vals| -> Option<Value> {
+            let [a] = vals else {
+                return None;
+            };
+            let a_val = *state.prims().unwrap_ref::<i64>(*a);
+            if a_val % 2 == 1 {
+                Some(state.prims().get(()))
+            } else {
+                None
+            }
+        },
+    ));
+
+    let assert_odd_rule = {
+        let mut rb = egraph.new_rule("assert_odd", true);
+        rb.call_external_func(
+            assert_odd,
+            &[value_1.clone()],
+            ColumnTy::Primitive(unit_prim),
+            "",
+        );
+        rb.call_external_func(
+            assert_odd,
+            &[value_2.clone()],
+            ColumnTy::Primitive(unit_prim),
+            "",
+        );
+        rb.build()
+    };
+
+    egraph.run_rules(&[assert_odd_rule]).err().unwrap();
 }
 
 const _: () = {

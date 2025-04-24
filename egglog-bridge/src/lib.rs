@@ -23,6 +23,7 @@ use core_relations::{
     Offset, PlanStrategy, PrimitiveId, Primitives, SortedWritesTable, TableId, TaggedRowBuffer,
     Value, WrappedTable,
 };
+use hashbrown::HashMap;
 use indexmap::{map::Entry, IndexMap, IndexSet};
 use log::info;
 use numeric_id::{define_id, DenseIdMap, DenseIdMapWithReuse, NumericId};
@@ -70,6 +71,12 @@ pub struct EGraph {
     rules: DenseIdMapWithReuse<RuleId, RuleInfo>,
     funcs: DenseIdMap<FunctionId, FunctionInfo>,
     panic_message: SideChannel<String>,
+    /// This is a cache of all the different panic messages that we may use while executing rules
+    /// against the EGraph. Oftentimes, these messages are generated dynamically: keeping this map
+    /// around allows us to cache external function ids with repeat panic messages and they can
+    /// also serve as a debugging tool in the case that the number of panic messages grows without
+    /// bound.
+    panic_funcs: HashMap<String, ExternalFunctionId>,
     proof_specs: DenseIdMap<ReasonSpecId, Arc<ProofReason>>,
     /// Side tables used to store proof information. We initialize these lazily
     /// as a proof object with a given number of parameters is added.
@@ -134,6 +141,7 @@ impl EGraph {
             rules: Default::default(),
             funcs: Default::default(),
             panic_message: Default::default(),
+            panic_funcs: Default::default(),
             proof_specs: Default::default(),
             reason_tables: Default::default(),
             term_tables: Default::default(),
@@ -605,6 +613,7 @@ impl EGraph {
         let table_id =
             self.db
                 .add_table(table, read_deps.iter().copied(), write_deps.iter().copied());
+
         let res = self.funcs.push(FunctionInfo {
             table: table_id,
             schema: schema.clone(),
@@ -919,14 +928,11 @@ impl FunctionInfo {
 }
 
 /// How defaults are computed for the given function.
-#[derive(Clone)]
+#[derive(Copy, Clone)]
 pub enum DefaultVal {
     /// Generate a fresh UF id.
     FreshId,
-    /// Stop executing the rule. If a lookup occurs in the body of a rule for a
-    /// mapping not in a function, execution of that rule will stop. This is
-    /// similar to placing the value in the left-hand side of the rule, but this
-    /// time the lookup can depend on values bound in the right-hand-side.
+    /// Cause an egglog-level panic if a lookup fails.
     Fail,
     /// Insert a constant of some kind.
     Const(Value),
@@ -1308,8 +1314,10 @@ struct Panic(String, SideChannel<String>);
 impl EGraph {
     /// Create a new `ExternalFunction` that panics with the given message.
     pub fn new_panic(&mut self, message: String) -> ExternalFunctionId {
-        let panic = Panic(message, self.panic_message.clone());
-        self.db.add_external_function(panic)
+        *self.panic_funcs.entry(message.clone()).or_insert_with(|| {
+            let panic = Panic(message, self.panic_message.clone());
+            self.db.add_external_function(panic)
+        })
     }
 }
 

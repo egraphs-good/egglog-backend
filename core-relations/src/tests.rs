@@ -1,4 +1,8 @@
-use std::{iter, ops::Range};
+use std::{
+    iter,
+    ops::Range,
+    sync::{Arc, Mutex},
+};
 
 use numeric_id::NumericId;
 
@@ -889,4 +893,186 @@ fn basic_math_egraph() -> MathEgraph {
 
 fn incremental_rebuild(uf_size: usize, table_size: usize) -> bool {
     uf_size / 4 > table_size
+}
+
+#[test]
+fn lookup_with_fallback_partial_success() {
+    // Insert (f 1) (f 2), (g 1) (g 3) (g 4).
+    // Run a query that iterates over g, binding x to 1, 3, 4.
+    // Insert (h (lookup f x, with fallback assert-even))
+    // Should get h 1, h 4
+    let mut db = Database::default();
+    let [f, g, h] = (0..3)
+        .map(|_| {
+            db.add_table(
+                SortedWritesTable::new(
+                    1,
+                    2,
+                    None,
+                    vec![],
+                    Box::new(move |_, a, b, _| {
+                        if a[0] != b[0] {
+                            panic!("merge not supported")
+                        } else {
+                            false
+                        }
+                    }),
+                ),
+                iter::empty(),
+                iter::empty(),
+            )
+        })
+        .collect::<Vec<_>>()[..]
+    else {
+        unreachable!()
+    };
+
+    {
+        let mut buf = db.get_table(f).new_buffer();
+        buf.stage_insert(&[v(1), v(0)]);
+        buf.stage_insert(&[v(2), v(0)]);
+    }
+    {
+        let mut buf = db.get_table(g).new_buffer();
+        buf.stage_insert(&[v(1), v(0)]);
+        buf.stage_insert(&[v(3), v(0)]);
+        buf.stage_insert(&[v(4), v(0)]);
+        buf.stage_insert(&[v(5), v(0)]);
+    }
+
+    db.merge_all();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let log_vals = {
+        let inner = log.clone();
+        db.add_external_function(make_external_func(move |_, args| {
+            let [x] = args else { panic!() };
+            inner.lock().unwrap().push(*x);
+            Some(*x)
+        }))
+    };
+    let assert_even = db.add_external_function(make_external_func(|_, args| {
+        let [x] = args else { panic!() };
+        if x.rep() % 2 == 0 {
+            Some(*x)
+        } else {
+            None
+        }
+    }));
+
+    let mut rsb = RuleSetBuilder::new(&mut db);
+    let mut query = rsb.new_rule();
+    let x = query.new_var();
+    let y = query.new_var();
+    query.add_atom(g, &[x.into(), y.into()], &[]).unwrap();
+    let mut rb = query.build();
+    let res = rb
+        .lookup_with_fallback(f, &[x.into()], ColumnId::new(0), assert_even, &[x.into()])
+        .unwrap();
+    rb.call_external(log_vals, &[x.into()]).unwrap();
+    rb.insert(h, &[res.into(), y.into()]).unwrap();
+    rb.build();
+    let rs = rsb.build();
+    assert!(db.run_rule_set(&rs));
+
+    let h = db.get_table(h);
+    let all = h.all();
+    let mut h_contents = h
+        .scan(all.as_ref())
+        .iter()
+        .map(|(_, row)| row.to_vec())
+        .collect::<Vec<_>>();
+    h_contents.sort();
+    assert_eq!(h_contents, vec![vec![v(1), v(0)], vec![v(4), v(0)],]);
+    let sorted_log = {
+        let mut log = log.lock().unwrap().clone();
+        log.sort();
+        log
+    };
+    assert_eq!(sorted_log, vec![v(1), v(4)]);
+}
+
+#[test]
+fn call_external_with_fallback() {
+    // Insert (f 1) (f 2) (f 3) (f 5).
+    // Iterate over f, binding x to 1, 2, 3.
+    // Have two external functions:
+    // 1. assert_even, which returns None for odd numbers.
+    // 2. inc, which increments the input value and only fails on the number 5
+    // Insert (h (call assert_even x, with fallback inc x))
+    // We should get h 2, h 4.
+    let mut db = Database::default();
+    let [f, h] = (0..2)
+        .map(|_| {
+            db.add_table(
+                SortedWritesTable::new(
+                    1,
+                    2,
+                    None,
+                    vec![],
+                    Box::new(move |_, a, b, _| {
+                        if a[0] != b[0] {
+                            panic!("merge not supported")
+                        } else {
+                            false
+                        }
+                    }),
+                ),
+                iter::empty(),
+                iter::empty(),
+            )
+        })
+        .collect::<Vec<_>>()[..]
+    else {
+        unreachable!()
+    };
+
+    {
+        let mut buf = db.get_table(f).new_buffer();
+        buf.stage_insert(&[v(1), v(0)]);
+        buf.stage_insert(&[v(2), v(0)]);
+        buf.stage_insert(&[v(3), v(0)]);
+        buf.stage_insert(&[v(5), v(0)]);
+    }
+    db.merge_all();
+    let assert_even = db.add_external_function(make_external_func(|_, args| {
+        let [x] = args else { panic!() };
+        if x.rep() % 2 == 0 {
+            Some(*x)
+        } else {
+            None
+        }
+    }));
+
+    let inc = db.add_external_function(make_external_func(|_, args| {
+        let [x] = args else { panic!() };
+        if x.rep() == 5 {
+            None
+        } else {
+            Some(x.inc())
+        }
+    }));
+
+    let mut rsb = RuleSetBuilder::new(&mut db);
+    let mut query = rsb.new_rule();
+    let x = query.new_var();
+    let y = query.new_var();
+    query.add_atom(f, &[x.into(), y.into()], &[]).unwrap();
+    let mut rb = query.build();
+    let res = rb
+        .call_external_with_fallback(assert_even, &[x.into()], inc, &[x.into()])
+        .unwrap();
+    rb.insert(h, &[res.into(), y.into()]).unwrap();
+    rb.build();
+    let rs = rsb.build();
+    assert!(db.run_rule_set(&rs));
+
+    let h = db.get_table(h);
+    let all = h.all();
+    let mut h_contents = h
+        .scan(all.as_ref())
+        .iter()
+        .map(|(_, row)| row.to_vec())
+        .collect::<Vec<_>>();
+    h_contents.sort();
+    assert_eq!(h_contents, vec![vec![v(2), v(0)], vec![v(4), v(0)],]);
 }

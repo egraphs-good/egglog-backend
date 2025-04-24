@@ -417,6 +417,7 @@ impl RuleBuilder<'_> {
         func: ExternalFunctionId,
         args: &[QueryEntry],
         ret_ty: ColumnTy,
+        panic_msg: &str,
     ) -> Variable {
         let args = args.to_vec();
         let res = self.new_var(ret_ty);
@@ -424,9 +425,11 @@ impl RuleBuilder<'_> {
             self.proof_builder
                 .register_prim(func, &args, res, ret_ty, self.egraph);
         }
+        // External functions that fail on the RHS of a rule should cause a panic.
+        let panic_fn = self.egraph.new_panic(panic_msg.to_string());
         self.query.add_rule.push(Box::new(move |inner, rb| {
             let args = inner.convert_all(&args);
-            let var = rb.call_external(func, &args)?;
+            let var = rb.call_external_with_fallback(func, &args, panic_fn, &[])?;
             inner.mapping.insert(res, var.into());
             Ok(())
         }));
@@ -547,6 +550,7 @@ impl RuleBuilder<'_> {
                 val: SUBSUMED,
                 ty: ColumnTy::Id,
             },
+            || "subsumed a nonextestent row!".to_string(),
         );
         let info = &self.egraph.funcs[func];
         let schema_math = SchemaMath {
@@ -600,6 +604,7 @@ impl RuleBuilder<'_> {
         func: FunctionId,
         entries: &[QueryEntry],
         subsumed: QueryEntry,
+        panic_msg: impl FnOnce() -> String,
     ) -> Variable {
         let entries = entries.to_vec();
         let info = &self.egraph.funcs[func];
@@ -714,15 +719,18 @@ impl RuleBuilder<'_> {
                 }
             }
             DefaultVal::Fail => {
+                let panic_func = self.egraph.new_panic(panic_msg());
                 if self.egraph.tracing {
                     let term_var = self.new_var(ColumnTy::Id);
                     self.proof_builder.add_lhs(&entries, term_var);
                     Box::new(move |inner, rb| {
                         let dst_vars = inner.convert_all(&entries);
-                        let var = rb.lookup(
+                        let var = rb.lookup_with_fallback(
                             table,
                             &dst_vars,
                             ColumnId::from_usize(schema_math.ret_val_col()),
+                            panic_func,
+                            &[],
                         )?;
                         let term = rb.lookup(
                             table,
@@ -736,10 +744,12 @@ impl RuleBuilder<'_> {
                 } else {
                     Box::new(move |inner, rb| {
                         let dst_vars = inner.convert_all(&entries);
-                        let var = rb.lookup(
+                        let var = rb.lookup_with_fallback(
                             table,
                             &dst_vars,
                             ColumnId::from_usize(schema_math.ret_val_col()),
+                            panic_func,
+                            &[],
                         )?;
                         inner.mapping.insert(res, var.into());
                         Ok(())
@@ -753,7 +763,15 @@ impl RuleBuilder<'_> {
 
     /// Look up the value of a function in the database. If the value is not
     /// present, the configured default for the function is used.
-    pub fn lookup(&mut self, func: FunctionId, entries: &[QueryEntry]) -> Variable {
+    ///
+    /// For functions configured with [`DefaultVal::Fail`], failing lookups will use `panic_msg` in
+    /// the panic output.
+    pub fn lookup(
+        &mut self,
+        func: FunctionId,
+        entries: &[QueryEntry],
+        panic_msg: impl FnOnce() -> String,
+    ) -> Variable {
         self.lookup_with_subsumed(
             func,
             entries,
@@ -761,6 +779,7 @@ impl RuleBuilder<'_> {
                 val: NOT_SUBSUMED,
                 ty: ColumnTy::Id,
             },
+            panic_msg,
         )
     }
 
@@ -921,7 +940,9 @@ impl RuleBuilder<'_> {
             func_cols: info.schema.len(),
         };
         if self.egraph.tracing {
-            let res = self.lookup(func, &entries[0..entries.len() - 1]);
+            let res = self.lookup(func, &entries[0..entries.len() - 1], || {
+                "lookup failed during proof-enabled set; this is an internal proofs bug".to_string()
+            });
             self.union(res.into(), entries.last().unwrap().clone());
             if schema_math.subsume {
                 // Set the original row but with the passed-in subsumption value.
@@ -975,7 +996,17 @@ impl RuleBuilder<'_> {
     /// Panic with a given message.
     pub fn panic(&mut self, message: String) {
         let panic = self.egraph.new_panic(message.clone());
-        self.call_external_func(panic, &[], ColumnTy::Id);
+        let ret_ty = ColumnTy::Id;
+        let res = self.new_var(ret_ty);
+        if self.egraph.tracing {
+            self.proof_builder
+                .register_prim(panic, &[], res, ret_ty, self.egraph);
+        }
+        self.query.add_rule.push(Box::new(move |inner, rb| {
+            let var = rb.call_external(panic, &[])?;
+            inner.mapping.insert(res, var.into());
+            Ok(())
+        }));
     }
 }
 
