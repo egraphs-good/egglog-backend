@@ -8,8 +8,7 @@ use std::{cmp::Ordering, sync::Arc};
 
 use anyhow::Context;
 use core_relations::{
-    ColumnId, Constraint, CounterId, ExternalFunctionId, PlanStrategy, PrimitivePrinter,
-    QueryBuilder, RuleBuilder as CoreRuleBuilder, RuleSetBuilder, TableId, Value, WriteVal,
+    ColumnId, Constraint, CounterId, ExternalFunction, ExternalFunctionId, PlanStrategy, PrimitivePrinter, QueryBuilder, RuleBuilder as CoreRuleBuilder, RuleSetBuilder, TableId, Value, WriteVal
 };
 use hashbrown::HashSet;
 use log::debug;
@@ -1007,6 +1006,11 @@ impl RuleBuilder<'_> {
             inner.mapping.insert(res, var.into());
             Ok(())
         }));
+    }
+
+    /// Enables dynamic registration of external functions for extractors
+    pub fn register_external_func(&mut self, func: impl ExternalFunction + 'static) -> ExternalFunctionId {
+        self.egraph.register_external_func(func)
     }
 }
 
