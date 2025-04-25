@@ -404,7 +404,7 @@ impl Database {
             if let Some(sub) = table_info.table.fast_subset(&c) {
                 return sub.size();
             }
-            sub = table_info.table.refine(sub, &[c]);
+            sub = table_info.table.refine_one(sub, &c);
         }
         sub.size()
     }
