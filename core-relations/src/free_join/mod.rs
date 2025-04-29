@@ -113,11 +113,24 @@ pub struct TableInfo {
 
 impl Clone for TableInfo {
     fn clone(&self) -> Self {
+        fn deep_clone_map<K: Clone + std::hash::Hash + Eq, TI: Clone>(
+            map: &DashMap<K, Arc<ReadOptimizedLock<TI>>>,
+        ) -> DashMap<K, Arc<ReadOptimizedLock<TI>>> {
+            map.iter()
+                .map(|table_ref| {
+                    let (k, v) = table_ref.pair();
+                    (
+                        k.clone(),
+                        Arc::new(ReadOptimizedLock::new(v.read().clone())),
+                    )
+                })
+                .collect()
+        }
         TableInfo {
             spec: self.spec.clone(),
             table: self.table.dyn_clone(),
-            indexes: self.indexes.clone(),
-            column_indexes: self.column_indexes.clone(),
+            indexes: deep_clone_map(&self.indexes),
+            column_indexes: deep_clone_map(&self.column_indexes),
         }
     }
 }
@@ -430,7 +443,10 @@ impl Database {
         self.counters.read(counter)
     }
 
-    /// A helper for merging all pending updates. Currently only used in tests.
+    /// A helper for merging all pending updates. Used to write to the database after updates have
+    /// been staged. Returns true if any tuples were added.
+    ///
+    /// Exposed for testing purposes.
     ///
     /// Useful for out-of-band insertions into the database.
     pub fn merge_all(&mut self) -> bool {
@@ -471,7 +487,7 @@ impl Database {
                         .par_iter_mut()
                         .map(|(_, (info, buffers))| {
                             let mut es = ExecutionState::new(&predicted, db, mem::take(buffers));
-                            info.as_mut().unwrap().table.merge(&mut es) || es.changed
+                            info.as_mut().unwrap().table.merge(&mut es).added || es.changed
                         })
                         .max()
                         .unwrap_or(false)
@@ -480,7 +496,7 @@ impl Database {
                         .iter_mut()
                         .map(|(_, (info, buffers))| {
                             let mut es = ExecutionState::new(&predicted, db, mem::take(buffers));
-                            info.as_mut().unwrap().table.merge(&mut es) || es.changed
+                            info.as_mut().unwrap().table.merge(&mut es).added || es.changed
                         })
                         .max()
                         .unwrap_or(false)
