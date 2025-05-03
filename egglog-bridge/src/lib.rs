@@ -1425,6 +1425,13 @@ struct RowVals<T> {
     ret_val: Option<T>,
 }
 
+/// A struct representing the content of a row in a function table
+#[derive(Clone, Debug)]
+pub struct FunctionRow<'a> {
+    pub vals: &'a [Value],
+    pub subsumed: bool,
+}
+
 impl SchemaMath {
     fn write_table_row<T: Clone>(
         &self,
