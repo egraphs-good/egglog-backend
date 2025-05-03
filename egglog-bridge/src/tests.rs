@@ -94,9 +94,10 @@ fn ac_test(tracing: bool, can_subsume: bool) {
     assert_eq!(canon_left, canon_right, "failed to reassociate!");
     if tracing {
         let mut row = Vec::new();
-        egraph.dump_table(add_table, |vals| {
+        egraph.dump_table(add_table, |func_row| {
+            assert!(!func_row.subsumed);
             row.clear();
-            row.extend_from_slice(vals);
+            row.extend_from_slice(func_row.vals);
         });
 
         let term_id = egraph.lookup_id(add_table, &row[0..row.len() - 1]).unwrap();
@@ -485,9 +486,10 @@ fn math_test(mut egraph: EGraph, can_subsume: bool) {
 
     if egraph.tracing {
         let mut row = Vec::new();
-        egraph.dump_table(mul, |vals| {
+        egraph.dump_table(mul, |func_row| {
+            assert!(!func_row.subsumed);
             row.clear();
-            row.extend_from_slice(vals);
+            row.extend_from_slice(func_row.vals);
         });
         let term_id = egraph.lookup_id(mul, &row[0..row.len() - 1]).unwrap();
         let explain = egraph.explain_term(term_id).unwrap();
@@ -773,8 +775,9 @@ fn rhs_only_rule() {
 
     assert!(contents.is_empty());
     assert!(egraph.run_rules(&[add_data]).unwrap());
-    egraph.dump_table(num_table, |vals| {
-        contents.push(vals.to_vec());
+    egraph.dump_table(num_table, |func_row| {
+        assert!(!func_row.subsumed);
+        contents.push(func_row.vals.to_vec());
     });
 
     contents.sort();
@@ -872,10 +875,11 @@ fn mergefn_arithmetic() {
     // Run the first rule and check state
     assert!(egraph.run_rules(&[rule1]).unwrap());
     let mut contents = Vec::new();
-    egraph.dump_table(f_table, |vals| {
+    egraph.dump_table(f_table, |func_row| {
+        assert!(!func_row.subsumed);
         contents.push((
-            *egraph.primitives().unwrap_ref::<i64>(vals[0]),
-            *egraph.primitives().unwrap_ref::<i64>(vals[1]),
+            *egraph.primitives().unwrap_ref::<i64>(func_row.vals[0]),
+            *egraph.primitives().unwrap_ref::<i64>(func_row.vals[1]),
         ));
     });
     contents.sort();
@@ -894,10 +898,11 @@ fn mergefn_arithmetic() {
     // Expected: (f 2 7) because 1 + (1 * 6) = 7
     assert!(egraph.run_rules(&[rule2]).unwrap());
     contents.clear();
-    egraph.dump_table(f_table, |vals| {
+    egraph.dump_table(f_table, |func_row| {
+        assert!(!func_row.subsumed);
         contents.push((
-            *egraph.primitives().unwrap_ref::<i64>(vals[0]),
-            *egraph.primitives().unwrap_ref::<i64>(vals[1]),
+            *egraph.primitives().unwrap_ref::<i64>(func_row.vals[0]),
+            *egraph.primitives().unwrap_ref::<i64>(func_row.vals[1]),
         ));
     });
     contents.sort();
@@ -916,10 +921,11 @@ fn mergefn_arithmetic() {
     // Expected: (f 2 29) because 1 + (7 * 4) = 29
     assert!(egraph.run_rules(&[rule3]).unwrap());
     contents.clear();
-    egraph.dump_table(f_table, |vals| {
+    egraph.dump_table(f_table, |func_row| {
+        assert!(!func_row.subsumed);
         contents.push((
-            *egraph.primitives().unwrap_ref::<i64>(vals[0]),
-            *egraph.primitives().unwrap_ref::<i64>(vals[1]),
+            *egraph.primitives().unwrap_ref::<i64>(func_row.vals[0]),
+            *egraph.primitives().unwrap_ref::<i64>(func_row.vals[1]),
         ));
     });
     contents.sort();
@@ -972,8 +978,9 @@ fn mergefn_nested_function() {
     // Helper function to get all g-table entries
     let get_g_entries = |egraph: &EGraph| {
         let mut entries = Vec::new();
-        egraph.dump_table(g_table, |vals| {
-            entries.push((vals[0], vals[1], vals[2]));
+        egraph.dump_table(g_table, |func_row| {
+            assert!(!func_row.subsumed);
+            entries.push((func_row.vals[0], func_row.vals[1], func_row.vals[2]));
         });
         entries.sort();
         entries
@@ -982,8 +989,9 @@ fn mergefn_nested_function() {
     // Helper function to get all f-table entries
     let get_f_entries = |egraph: &EGraph| {
         let mut entries = Vec::new();
-        egraph.dump_table(f_table, |vals| {
-            entries.push((*egraph.primitives().unwrap_ref::<i64>(vals[0]), vals[1]));
+        egraph.dump_table(f_table, |func_row| {
+            assert!(!func_row.subsumed);
+            entries.push((*egraph.primitives().unwrap_ref::<i64>(func_row.vals[0]), func_row.vals[1]));
         });
         entries.sort();
         entries
@@ -1104,8 +1112,9 @@ fn constrain_prims_simple() {
     };
     let get_entries = |egraph: &EGraph, table: FunctionId| {
         let mut entries = Vec::new();
-        egraph.dump_table(table, |vals| {
-            entries.push((*egraph.primitives().unwrap_ref::<i64>(vals[0]), vals[1]));
+        egraph.dump_table(table, |func_row| {
+            assert!(!func_row.subsumed);
+            entries.push((*egraph.primitives().unwrap_ref::<i64>(func_row.vals[0]), func_row.vals[1]));
         });
         entries.sort();
         entries
@@ -1197,8 +1206,9 @@ fn constrain_prims_abstract() {
     };
     let get_entries = |egraph: &EGraph, table: FunctionId| {
         let mut entries = Vec::new();
-        egraph.dump_table(table, |vals| {
-            entries.push((*egraph.primitives().unwrap_ref::<i64>(vals[0]), vals[1]));
+        egraph.dump_table(table, |func_row| {
+            assert!(!func_row.subsumed);
+            entries.push((*egraph.primitives().unwrap_ref::<i64>(func_row.vals[0]), func_row.vals[1]));
         });
         entries.sort();
         entries
@@ -1264,27 +1274,31 @@ fn basic_subsumption() {
     };
     let get_entries = |egraph: &EGraph, table: FunctionId| {
         let mut entries = Vec::new();
-        egraph.dump_table(table, |vals| {
-            entries.push((*egraph.primitives().unwrap_ref::<i64>(vals[0]), vals[1]));
+        let mut num_subsumed = 0;
+        egraph.dump_table(table, |func_row| {
+            entries.push((*egraph.primitives().unwrap_ref::<i64>(func_row.vals[0]), func_row.vals[1]));
+            if func_row.subsumed {
+                num_subsumed += 1;
+            }
         });
         entries.sort();
-        entries
+        (entries, num_subsumed)
     };
 
-    assert!(get_entries(&egraph, f_table).is_empty());
-    assert!(get_entries(&egraph, g_table).is_empty());
+    assert!(get_entries(&egraph, f_table).0.is_empty());
+    assert!(get_entries(&egraph, g_table).0.is_empty());
     egraph.run_rules(&[write_f]).unwrap();
     let f = get_entries(&egraph, f_table);
-    assert_eq!(f.len(), 2);
-    assert_eq!(f.iter().map(|(x, _)| *x).collect::<Vec<_>>(), vec![1, 2]);
+    assert_eq!((f.0.len(), f.1), (2, 0));
+    assert_eq!(f.0.iter().map(|(x, _)| *x).collect::<Vec<_>>(), vec![1, 2]);
     egraph.run_rules(&[subsume_f]).unwrap();
     let f = get_entries(&egraph, f_table);
-    assert_eq!(f.len(), 3);
-    assert_eq!(f.iter().map(|(x, _)| *x).collect::<Vec<_>>(), vec![1, 2, 3]);
+    assert_eq!((f.0.len(), f.1), (3, 2));
+    assert_eq!(f.0.iter().map(|(x, _)| *x).collect::<Vec<_>>(), vec![1, 2, 3]);
     egraph.run_rules(&[copy_to_g]).unwrap();
     let g = get_entries(&egraph, g_table);
-    assert_eq!(g.len(), 1);
-    assert_eq!(g[0], f[0])
+    assert_eq!((g.0.len(), g.1), (1, 0));
+    assert_eq!(g.0[0], f.0[0])
 }
 
 #[test]
