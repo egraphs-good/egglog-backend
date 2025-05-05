@@ -33,7 +33,7 @@ use crate::{
         ColumnId, Constraint, Generation, MutationBuffer, Offset, Row, Table, TableSpec,
         TableVersion,
     },
-    Pooled, TableId,
+    Pooled, TableChange, TableId,
 };
 
 mod rebuild;
@@ -412,67 +412,67 @@ impl Table for SortedWritesTable {
         match constraint {
             Constraint::Eq { .. } => None,
             Constraint::EqConst { col, val } => {
-                if col == &sort_by {
-                    match self.binary_search_sort_val(*val) {
-                        Ok((found, bound)) => Some(Subset::Dense(OffsetRange::new(found, bound))),
-                        Err(_) => Some(Subset::empty()),
+                        if col == &sort_by {
+                            match self.binary_search_sort_val(*val) {
+                                Ok((found, bound)) => Some(Subset::Dense(OffsetRange::new(found, bound))),
+                                Err(_) => Some(Subset::empty()),
+                            }
+                        } else {
+                            None
+                        }
                     }
-                } else {
-                    None
-                }
-            }
             Constraint::LtConst { col, val } => {
-                if col == &sort_by {
-                    match self.binary_search_sort_val(*val) {
-                        Ok((found, _)) => {
-                            Some(Subset::Dense(OffsetRange::new(RowId::new(0), found)))
+                        if col == &sort_by {
+                            match self.binary_search_sort_val(*val) {
+                                Ok((found, _)) => {
+                                    Some(Subset::Dense(OffsetRange::new(RowId::new(0), found)))
+                                }
+                                Err(next) => Some(Subset::Dense(OffsetRange::new(RowId::new(0), next))),
+                            }
+                        } else {
+                            None
                         }
-                        Err(next) => Some(Subset::Dense(OffsetRange::new(RowId::new(0), next))),
                     }
-                } else {
-                    None
-                }
-            }
             Constraint::GtConst { col, val } => {
-                if col == &sort_by {
-                    match self.binary_search_sort_val(*val) {
-                        Ok((_, bound)) => {
-                            Some(Subset::Dense(OffsetRange::new(bound, self.data.next_row())))
-                        }
-                        Err(next) => {
-                            Some(Subset::Dense(OffsetRange::new(next, self.data.next_row())))
+                        if col == &sort_by {
+                            match self.binary_search_sort_val(*val) {
+                                Ok((_, bound)) => {
+                                    Some(Subset::Dense(OffsetRange::new(bound, self.data.next_row())))
+                                }
+                                Err(next) => {
+                                    Some(Subset::Dense(OffsetRange::new(next, self.data.next_row())))
+                                }
+                            }
+                        } else {
+                            None
                         }
                     }
-                } else {
-                    None
-                }
-            }
             Constraint::LeConst { col, val } => {
-                if col == &sort_by {
-                    match self.binary_search_sort_val(*val) {
-                        Ok((_, bound)) => {
-                            Some(Subset::Dense(OffsetRange::new(RowId::new(0), bound)))
+                        if col == &sort_by {
+                            match self.binary_search_sort_val(*val) {
+                                Ok((_, bound)) => {
+                                    Some(Subset::Dense(OffsetRange::new(RowId::new(0), bound)))
+                                }
+                                Err(next) => Some(Subset::Dense(OffsetRange::new(RowId::new(0), next))),
+                            }
+                        } else {
+                            None
                         }
-                        Err(next) => Some(Subset::Dense(OffsetRange::new(RowId::new(0), next))),
                     }
-                } else {
-                    None
-                }
-            }
             Constraint::GeConst { col, val } => {
-                if col == &sort_by {
-                    match self.binary_search_sort_val(*val) {
-                        Ok((found, _)) => {
-                            Some(Subset::Dense(OffsetRange::new(found, self.data.next_row())))
-                        }
-                        Err(next) => {
-                            Some(Subset::Dense(OffsetRange::new(next, self.data.next_row())))
+                        if col == &sort_by {
+                            match self.binary_search_sort_val(*val) {
+                                Ok((found, _)) => {
+                                    Some(Subset::Dense(OffsetRange::new(found, self.data.next_row())))
+                                }
+                                Err(next) => {
+                                    Some(Subset::Dense(OffsetRange::new(next, self.data.next_row())))
+                                }
+                            }
+                        } else {
+                            None
                         }
                     }
-                } else {
-                    None
-                }
-            }
         }
     }
 
@@ -495,12 +495,11 @@ impl Table for SortedWritesTable {
         })
     }
 
-    fn merge(&mut self, exec_state: &mut ExecutionState) -> bool {
-        let mut changed = false;
-        changed |= self.do_delete();
-        changed |= self.do_insert(exec_state);
+    fn merge(&mut self, exec_state: &mut ExecutionState) -> TableChange {
+        let removed = self.do_delete();
+        let added = self.do_insert(exec_state);
         self.maybe_rehash();
-        changed
+        TableChange { removed, added }
     }
 
     fn get_row(&self, key: &[Value]) -> Option<Row> {

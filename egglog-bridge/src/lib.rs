@@ -367,16 +367,16 @@ impl EGraph {
     /// Lookup the id associated with a function `func` and the given arguments
     /// (`key`).
     pub fn lookup_id(&self, func: FunctionId, key: &[Value]) -> Option<Value> {
-        let table_id = self.funcs[func].table;
+        let info = &self.funcs[func];
+        let schema_math = SchemaMath {
+            tracing: self.tracing,
+            subsume: info.can_subsume,
+            func_cols: info.schema.len(),
+        };
+        let table_id = info.table;
         let table = self.db.get_table(table_id);
         let row = table.get_row(key)?;
-        if self.tracing {
-            // Return the "term id"
-            Some(row.vals[row.vals.len() - 1])
-        } else {
-            // Return the eclass id
-            Some(row.vals[row.vals.len() - 2])
-        }
+        Some(row.vals[schema_math.ret_val_col()])
     }
 
     fn get_fiat_reason(&mut self, desc: &str) -> Value {
@@ -505,8 +505,10 @@ impl EGraph {
 
     /// Read the contents of the given function.
     ///
+    /// The callback function is called with each row and its subsumption status.
+    ///
     /// Useful for debugging.
-    pub fn dump_table(&self, table: FunctionId, mut f: impl FnMut(&[Value])) {
+    pub fn dump_table(&self, table: FunctionId, mut f: impl FnMut(FunctionRow<'_>)) {
         let info = &self.funcs[table];
         let table = self.funcs[table].table;
         let schema_math = SchemaMath {
@@ -519,13 +521,17 @@ impl EGraph {
         let mut cur = Offset::new(0);
         let mut buf = TaggedRowBuffer::new(imp.spec().arity());
         while let Some(next) = imp.scan_bounded(all.as_ref(), cur, 500, &mut buf) {
-            buf.non_stale()
-                .for_each(|(_, row)| f(&row[0..schema_math.func_cols]));
+            buf.non_stale().for_each(|(_, row)| {
+                let subsumed = schema_math.subsume && row[schema_math.subsume_col()] == SUBSUMED;
+                f(FunctionRow { vals: &row[0..schema_math.func_cols], subsumed })
+            });
             cur = next;
             buf.clear();
         }
-        buf.non_stale()
-            .for_each(|(_, row)| f(&row[0..schema_math.func_cols]));
+        buf.non_stale().for_each(|(_, row)| {
+            let subsumed = schema_math.subsume && row[schema_math.subsume_col()] == SUBSUMED;
+            f(FunctionRow { vals: &row[0..schema_math.func_cols], subsumed })
+        });
     }
 
     /// A basic method for dumping the state of the database to `log::info!`.
@@ -676,14 +682,47 @@ impl EGraph {
             for (_, func) in self.funcs.iter() {
                 tables.push(func.table);
             }
-            while self
-                .db
-                .apply_rebuild(self.uf_table, &tables, self.next_ts().to_value())
-                || self.db.rebuild_containers(self.uf_table)
-            {
+            loop {
+                // Order matters here: we need to rebuild containers first and then rebuild the
+                // tables. Why?
+                //
+                // Say we have a sort that can map to and from a vector containing only itself:
+                // (sort X)
+                // (function to-vec (X) (Vec X) :no-merge)
+                // (constructor from-vec (Vec X) X)
+                // (constructor Num (i64) X)
+                // (constructor Add (X X) X)
+                //
+                // Along with rules:
+                // (rule ((= x (Num i))) ((set (to-vec x) (vec-of x))))
+                // (rule ((= x (Add i j))) ((set (to-vec x) (vec-of x))))
+                // (rule ((= x (from-vec v))) ((set (to-vec x) v))
+                // (rewrite (Add (Num i) (Num j)) (Num (+ i j)))
+                //
+                // These rules, while redundant, should be safe. However, if we rebuild tables
+                // before containers some schedules can cause us to violate the `:no-merge`
+                // directive, which asserts that all values written for a key are equal.
+                //
+                // Suppose we start off with x1=(Num 1), x2=(Num 3), and x3=(Add (Num 1) (Num 2)) as
+                // expressions, with `to-vec` and `from-vec` entries for all three expressions.
+                // We'll call (to-vec xi) vi for all i.
+                //
+                // Now suppose we run the `rewrite` above: now, x3 = x2. But v3 will only equal v2
+                // _after_ we rebuild the `Vec` container. That means that if we rebuild `to-vec`
+                // we will collapse the the rows for x3 and x2, but then fail to merge v3 and v2
+                // because they are not (yet) equal.
+                //
+                // Rebuilding containers first will find that v3 and v2 are equal, and the rest of
+                // the rules can proceed.
+                let container_rebuild = self.db.rebuild_containers(self.uf_table);
+                let table_rebuild =
+                    self.db
+                        .apply_rebuild(self.uf_table, &tables, self.next_ts().to_value());
                 self.inc_ts();
+                if !table_rebuild && !container_rebuild {
+                    break;
+                }
             }
-            self.inc_ts();
             return Ok(());
         }
         if do_parallel() {
@@ -1387,6 +1426,8 @@ struct SchemaMath {
 
 /// A struct containing possible non-key portions of a table row. To be used with
 /// [`SchemaMath::write_table_row`].
+/// 
+/// This is not to be confused with [`FunctionRow`], which is higher-level and for public uses.
 struct RowVals<T> {
     /// The timestamp for the row.
     timestamp: T,
@@ -1397,6 +1438,13 @@ struct RowVals<T> {
     /// The return value of the row. Return values are mandatory but callers may have already
     /// filled it in.
     ret_val: Option<T>,
+}
+
+/// A struct representing the content of a row in a function table
+#[derive(Clone, Debug)]
+pub struct FunctionRow<'a> {
+    pub vals: &'a [Value],
+    pub subsumed: bool,
 }
 
 impl SchemaMath {
