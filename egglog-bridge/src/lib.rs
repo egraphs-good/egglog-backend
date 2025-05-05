@@ -217,6 +217,13 @@ impl EGraph {
         }
     }
 
+    pub fn get_table_id(
+        &self,
+        function_id: FunctionId,
+    ) -> TableId {
+        self.funcs.get(function_id).expect("Impossible").table
+    }
+
     pub fn register_external_func(
         &mut self,
         func: impl ExternalFunction + 'static,
