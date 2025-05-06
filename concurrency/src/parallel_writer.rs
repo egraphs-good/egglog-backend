@@ -64,13 +64,13 @@ impl<T> ParallelVecWriter<T> {
     /// should be careful about keeping the object returned from this method
     /// around for too long.
     pub fn read_access(&self) -> impl Deref<Target = [T]> + '_ {
-        struct PrefixReader<'a, T> {
-            reader: MutexReader<'a, Vec<T>>,
+        struct PrefixReader<S> {
+            reader: S,
         }
-        impl<T> Deref for PrefixReader<'_, T> {
-            type Target = [T];
+        impl<Elt, S: Deref<Target = Vec<Elt>>> Deref for PrefixReader<S> {
+            type Target = [Elt];
 
-            fn deref(&self) -> &[T] {
+            fn deref(&self) -> &[Elt] {
                 self.reader.as_slice()
             }
         }
@@ -84,11 +84,11 @@ impl<T> ParallelVecWriter<T> {
     /// This handle allows for reads past the end of the wrapped vector. Callers must guarantee
     /// that any cells read are covered by a corresponding call to
     /// [`ParallelVecWriter::write_contents`].
-    pub fn unsafe_read_access(&self) -> UnsafeReadAccess<'_, T> {
-        UnsafeReadAccess {
-            reader: self.data.read(),
-        }
-    }
+    // pub fn unsafe_read_access(&self) -> UnsafeReadAccess<'_, T> {
+    //     UnsafeReadAccess {
+    //         reader: self.data.read(),
+    //     }
+    // }
 
     /// Runs `f` with access to the element at `idx`.
     ///

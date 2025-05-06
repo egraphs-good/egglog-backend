@@ -101,22 +101,25 @@ impl<T> ConcurrentVec<T> {
     }
 }
 
-struct ReadHandle<'a, T> {
+struct ReadHandle<T> {
     valid_prefix: usize,
-    reader: MutexReader<'a, Vec<MaybeUninit<SyncUnsafeCell<T>>>>,
+    reader: T,
 }
 
-impl<T> Deref for ReadHandle<'_, T> {
-    type Target = [T];
+impl<Elt, T> Deref for ReadHandle<T>
+where
+    T: Deref<Target = Vec<MaybeUninit<SyncUnsafeCell<Elt>>>>,
+{
+    type Target = [Elt];
 
-    fn deref(&self) -> &[T] {
+    fn deref(&self) -> &[Elt] {
         // SAFETY: all elements up to `prefix` are valid, and MaybeUninit<T> has
         // a compatible layout with T so long as T is properly initialized.
         //
         // NB: transmuting an UnsafeCell<T> to <T> may not be safe long-term,
         // even though this code passes miri.
         unsafe {
-            mem::transmute::<&[MaybeUninit<SyncUnsafeCell<T>>], &[T]>(
+            mem::transmute::<&[MaybeUninit<SyncUnsafeCell<Elt>>], &[Elt]>(
                 &self.reader[0..self.valid_prefix],
             )
         }
