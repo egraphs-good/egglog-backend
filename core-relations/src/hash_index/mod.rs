@@ -260,47 +260,50 @@ impl IndexBase for ColumnIndex {
             }
         };
 
-        // NB: we use in_place_scope to deliberately block the calling thread and avoid it stealing
-        // more work from the parent thread pool. Why? Because we may have called this function
-        // with a lock held, and stealing work may cause us to recursively attempt to acquire the
-        // same lock!
-        THREAD_POOL.in_place_scope(|_| {
-            rayon::scope(|scope| {
-                let mut cur = Offset::new(0);
-                loop {
-                    let mut buf = TaggedRowBuffer::new(cols.len());
-                    if let Some(next) =
-                        table.scan_project(subset, cols, cur, BATCH_SIZE, &[], &mut buf)
-                    {
-                        cur = next;
-                        scope.spawn(move |_| split_buf(buf));
-                    } else {
-                        scope.spawn(move |_| split_buf(buf));
-                        break;
+        // NB: we use in_place_scope followed by `spawn` to deliberately block the calling thread
+        // and avoid it stealing more work from the parent thread pool. Why? Because we may have
+        // called this function with a lock held, and stealing work may cause us to recursively
+        // attempt to acquire the same lock!
+        THREAD_POOL.in_place_scope(|outer| {
+            outer.spawn(|_outer| {
+                rayon::in_place_scope(|inner| {
+                    let mut cur = Offset::new(0);
+                    loop {
+                        let mut buf = TaggedRowBuffer::new(cols.len());
+                        if let Some(next) =
+                            table.scan_project(subset, cols, cur, BATCH_SIZE, &[], &mut buf)
+                        {
+                            cur = next;
+                            inner.spawn(move |_| split_buf(buf));
+                        } else {
+                            inner.spawn(move |_| split_buf(buf));
+                            break;
+                        }
                     }
-                }
-            });
-            self.shards.par_iter_mut().for_each(|(shard_id, shard)| {
-                use indexmap::map::Entry;
-                // Sort the vector by start row id to ensure we populate subsets in sorted order.
-                let mut vec = queues[shard_id].lock().unwrap();
-                vec.sort_by_key(|(start, _)| *start);
-                for (_, buf) in vec.drain(..) {
-                    for (row_id, key) in buf.non_stale() {
-                        debug_assert_eq!(key.len(), 1);
-                        match shard.table.entry(key[0]) {
-                            Entry::Occupied(mut occ) => {
-                                // SAFETY: all of the buffered vectors in this map come from `subsets`.
-                                unsafe {
-                                    occ.get_mut().add_row_sorted(row_id, &mut shard.subsets);
+                });
+
+                self.shards.par_iter_mut().for_each(|(shard_id, shard)| {
+                    use indexmap::map::Entry;
+                    // Sort the vector by start row id to ensure we populate subsets in sorted order.
+                    let mut vec = queues[shard_id].lock().unwrap();
+                    vec.sort_by_key(|(start, _)| *start);
+                    for (_, buf) in vec.drain(..) {
+                        for (row_id, key) in buf.non_stale() {
+                            debug_assert_eq!(key.len(), 1);
+                            match shard.table.entry(key[0]) {
+                                Entry::Occupied(mut occ) => {
+                                    // SAFETY: all of the buffered vectors in this map come from `subsets`.
+                                    unsafe {
+                                        occ.get_mut().add_row_sorted(row_id, &mut shard.subsets);
+                                    }
                                 }
-                            }
-                            Entry::Vacant(v) => {
-                                v.insert(BufferedSubset::singleton(row_id));
+                                Entry::Vacant(v) => {
+                                    v.insert(BufferedSubset::singleton(row_id));
+                                }
                             }
                         }
                     }
-                }
+                });
             });
         });
     }

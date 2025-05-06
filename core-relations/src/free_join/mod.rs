@@ -656,7 +656,6 @@ fn get_index_from_tableinfo(table_info: &TableInfo, cols: &[ColumnId]) -> HashIn
                 TupleIndex::new(cols.len()),
             )))
         })
-        .value()
         .clone();
     let ix = index.read();
     if ix.needs_refresh(table_info.table.as_ref()) {
@@ -687,5 +686,5 @@ fn get_column_index_from_tableinfo(table_info: &TableInfo, col: ColumnId) -> Has
         let mut ix = index.lock();
         ix.refresh(table_info.table.as_ref());
     }
-    index.clone()
+    index
 }
