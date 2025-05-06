@@ -260,7 +260,11 @@ impl IndexBase for ColumnIndex {
             }
         };
 
-        THREAD_POOL.install(|| {
+        // NB: we use in_place_scope to deliberately block the calling thread and avoid it stealing
+        // more work from the parent thread pool. Why? Because we may have called this function
+        // with a lock held, and stealing work may cause us to recursively attempt to acquire the
+        // same lock!
+        THREAD_POOL.in_place_scope(|_| {
             rayon::scope(|scope| {
                 let mut cur = Offset::new(0);
                 loop {
