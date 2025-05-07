@@ -2,9 +2,10 @@
 use std::{
     hash::{Hash, Hasher},
     mem,
-    sync::Mutex,
+    sync::{Arc, Mutex},
 };
 
+use concurrency::Notification;
 use hashbrown::HashTable;
 use numeric_id::{define_id, IdVec, NumericId};
 use once_cell::sync::Lazy;
@@ -260,53 +261,84 @@ impl IndexBase for ColumnIndex {
             }
         };
 
-        // NB: we use in_place_scope followed by `spawn` to deliberately block the calling thread
-        // and avoid it stealing more work from the parent thread pool. Why? Because we may have
-        // called this function with a lock held, and stealing work may cause us to recursively
-        // attempt to acquire the same lock!
-        THREAD_POOL.in_place_scope(|outer| {
-            outer.spawn(|_outer| {
-                rayon::in_place_scope(|inner| {
-                    let mut cur = Offset::new(0);
-                    loop {
-                        let mut buf = TaggedRowBuffer::new(cols.len());
-                        if let Some(next) =
-                            table.scan_project(subset, cols, cur, BATCH_SIZE, &[], &mut buf)
-                        {
-                            cur = next;
-                            inner.spawn(move |_| split_buf(buf));
-                        } else {
-                            inner.spawn(move |_| split_buf(buf));
-                            break;
-                        }
+        run_in_thread_pool_and_block(&THREAD_POOL, || {
+            rayon::in_place_scope(|inner| {
+                let mut cur = Offset::new(0);
+                loop {
+                    let mut buf = TaggedRowBuffer::new(cols.len());
+                    if let Some(next) =
+                        table.scan_project(subset, cols, cur, BATCH_SIZE, &[], &mut buf)
+                    {
+                        cur = next;
+                        inner.spawn(move |_| split_buf(buf));
+                    } else {
+                        inner.spawn(move |_| split_buf(buf));
+                        break;
                     }
-                });
+                }
+            });
 
-                self.shards.par_iter_mut().for_each(|(shard_id, shard)| {
-                    use indexmap::map::Entry;
-                    // Sort the vector by start row id to ensure we populate subsets in sorted order.
-                    let mut vec = queues[shard_id].lock().unwrap();
-                    vec.sort_by_key(|(start, _)| *start);
-                    for (_, buf) in vec.drain(..) {
-                        for (row_id, key) in buf.non_stale() {
-                            debug_assert_eq!(key.len(), 1);
-                            match shard.table.entry(key[0]) {
-                                Entry::Occupied(mut occ) => {
-                                    // SAFETY: all of the buffered vectors in this map come from `subsets`.
-                                    unsafe {
-                                        occ.get_mut().add_row_sorted(row_id, &mut shard.subsets);
-                                    }
+            self.shards.par_iter_mut().for_each(|(shard_id, shard)| {
+                use indexmap::map::Entry;
+                // Sort the vector by start row id to ensure we populate subsets in sorted order.
+                let mut vec = queues[shard_id].lock().unwrap();
+                vec.sort_by_key(|(start, _)| *start);
+                for (_, buf) in vec.drain(..) {
+                    for (row_id, key) in buf.non_stale() {
+                        debug_assert_eq!(key.len(), 1);
+                        match shard.table.entry(key[0]) {
+                            Entry::Occupied(mut occ) => {
+                                // SAFETY: all of the buffered vectors in this map come from `subsets`.
+                                unsafe {
+                                    occ.get_mut().add_row_sorted(row_id, &mut shard.subsets);
                                 }
-                                Entry::Vacant(v) => {
-                                    v.insert(BufferedSubset::singleton(row_id));
-                                }
+                            }
+                            Entry::Vacant(v) => {
+                                v.insert(BufferedSubset::singleton(row_id));
                             }
                         }
                     }
-                });
+                }
             });
         });
     }
+}
+
+/// This function is an alternative for [`rayon::ThreadPool::install`] that doesn't steal work from
+/// the callee's current thread pool while waiting for `f` to finish.
+///
+/// We do this to avoid deadlocks. The whole purpose of using a separate threadpool in this module
+/// is to allow for sufficient parallelism while holding a lock on the main threadpool. That means
+/// we are not worried about an outer lock tying up a thread in the main pool.
+///
+/// On the other hand, it _is_ a bad idea to steal work on a rayon thread pool with some locks
+/// held. In particular, if another task on the thread pool _itself_ attempts to aquire the same
+/// lock, this can cause a deadlock. We saw this in the tests for this crate. The relevant lock
+/// are those around individual indexes stored in the database-level index cache.
+fn run_in_thread_pool_and_block<'a>(pool: &rayon::ThreadPool, f: impl FnMut() + Send + 'a) {
+    // NB: We don't need the heap allocations here. But we are aonly calling this function if
+    // we are about to do a bunch of work, so clarify is probably going to be better than (even
+    // more) unsafe code.
+
+    // Alright, here we go: pretend `f` has `'static` lifetime because we are passing it to
+    // `spawn`.
+    trait LifetimeWork<'a>: FnMut() + Send + 'a {}
+
+    impl<'a, F: FnMut() + Send + 'a> LifetimeWork<'a> for F {}
+    let as_lifetime: Box<dyn LifetimeWork<'a>> = Box::new(f);
+    let mut casted_away = unsafe {
+        // SAFETY: `casted_away` will be dropped at the end of this method. The notification used
+        // below will ensure it does not escape.
+        mem::transmute::<Box<dyn LifetimeWork<'a>>, Box<dyn LifetimeWork<'static>>>(as_lifetime)
+    };
+    let n = Arc::new(Notification::new());
+    let inner = n.clone();
+    pool.spawn(move || {
+        casted_away();
+        mem::drop(casted_away);
+        inner.notify();
+    });
+    n.wait()
 }
 
 impl ColumnIndex {
@@ -454,7 +486,7 @@ impl IndexBase for TupleIndex {
                 queues[shard_id].lock().unwrap().push((first, buf));
             }
         };
-        THREAD_POOL.install(|| {
+        run_in_thread_pool_and_block(&THREAD_POOL, || {
             rayon::scope(|scope| {
                 let mut cur = Offset::new(0);
                 loop {
