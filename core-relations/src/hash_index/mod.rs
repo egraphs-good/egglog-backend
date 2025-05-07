@@ -316,7 +316,7 @@ impl IndexBase for ColumnIndex {
 /// lock, this can cause a deadlock. We saw this in the tests for this crate. The relevant lock
 /// are those around individual indexes stored in the database-level index cache.
 fn run_in_thread_pool_and_block<'a>(pool: &rayon::ThreadPool, f: impl FnMut() + Send + 'a) {
-    // NB: We don't need the heap allocations here. But we are aonly calling this function if
+    // NB: We don't need the heap allocations here. But we are only calling this function if
     // we are about to do a bunch of work, so clarify is probably going to be better than (even
     // more) unsafe code.
 
