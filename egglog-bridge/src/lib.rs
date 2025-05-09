@@ -217,11 +217,16 @@ impl EGraph {
         }
     }
 
-    pub fn get_table_id(
-        &self,
-        function_id: FunctionId,
-    ) -> TableId {
-        self.funcs.get(function_id).expect("Impossible").table
+    pub fn get_func_info(&self, func: FunctionId) -> (TableId, SchemaMath) {
+        let info = &self.funcs[func];
+        (
+            info.table,
+            SchemaMath {
+                tracing: self.tracing,
+                subsume: info.can_subsume,
+                func_cols: info.schema.len(),
+            },
+        )
     }
 
     pub fn register_external_func(
@@ -304,12 +309,7 @@ impl EGraph {
     /// # Panics
     /// This method panics if the values do not match the arity of the function.
     pub fn add_term(&mut self, func: FunctionId, inputs: &[Value], desc: &str) -> Value {
-        let info = &self.funcs[func];
-        let schema_math = SchemaMath {
-            tracing: self.tracing,
-            subsume: info.can_subsume,
-            func_cols: info.schema.len(),
-        };
+        let (table_id, schema_math) = self.get_func_info(func);
         let mut extended_row = Vec::new();
         extended_row.extend_from_slice(inputs);
         let term = self.tracing.then(|| {
@@ -327,7 +327,6 @@ impl EGraph {
             },
         );
         extended_row[schema_math.ret_val_col()] = res;
-        let table_id = self.funcs[func].table;
         self.db
             .get_table(table_id)
             .new_buffer()
@@ -367,13 +366,7 @@ impl EGraph {
     /// Lookup the id associated with a function `func` and the given arguments
     /// (`key`).
     pub fn lookup_id(&self, func: FunctionId, key: &[Value]) -> Option<Value> {
-        let info = &self.funcs[func];
-        let schema_math = SchemaMath {
-            tracing: self.tracing,
-            subsume: info.can_subsume,
-            func_cols: info.schema.len(),
-        };
-        let table_id = info.table;
+        let (table_id, schema_math) = self.get_func_info(func);
         let table = self.db.get_table(table_id);
         let row = table.get_row(key)?;
         Some(row.vals[schema_math.ret_val_col()])
@@ -410,13 +403,7 @@ impl EGraph {
         let reason_id = self.tracing.then(|| self.get_fiat_reason(desc));
         let mut bufs = DenseIdMap::default();
         for (func, row) in values.into_iter() {
-            let table_info = &self.funcs[func];
-            let schema_math = SchemaMath {
-                tracing: self.tracing,
-                subsume: table_info.can_subsume,
-                func_cols: table_info.schema.len(),
-            };
-            let table_id = table_info.table;
+            let (table_id, schema_math) = self.get_func_info(func);
             let term_id = reason_id.map(|reason| {
                 // Get the term id itself
                 let term_id = self.get_term(func, &row[0..schema_math.num_keys()], reason);
@@ -508,29 +495,29 @@ impl EGraph {
     /// The callback function is called with each row and its subsumption status.
     ///
     /// Useful for debugging.
-    pub fn dump_table(&self, table: FunctionId, mut f: impl FnMut(FunctionRow<'_>)) {
-        let info = &self.funcs[table];
-        let table = self.funcs[table].table;
-        let schema_math = SchemaMath {
-            tracing: self.tracing,
-            subsume: info.can_subsume,
-            func_cols: info.schema.len(),
-        };
-        let imp = self.db.get_table(table);
+    pub fn dump_table(&self, func: FunctionId, mut f: impl FnMut(FunctionRow<'_>)) {
+        let (table_id, schema_math) = self.get_func_info(func);
+        let imp = self.db.get_table(table_id);
         let all = imp.all();
         let mut cur = Offset::new(0);
         let mut buf = TaggedRowBuffer::new(imp.spec().arity());
         while let Some(next) = imp.scan_bounded(all.as_ref(), cur, 500, &mut buf) {
             buf.non_stale().for_each(|(_, row)| {
                 let subsumed = schema_math.subsume && row[schema_math.subsume_col()] == SUBSUMED;
-                f(FunctionRow { vals: &row[0..schema_math.func_cols], subsumed })
+                f(FunctionRow {
+                    vals: &row[0..schema_math.func_cols],
+                    subsumed,
+                })
             });
             cur = next;
             buf.clear();
         }
         buf.non_stale().for_each(|(_, row)| {
             let subsumed = schema_math.subsume && row[schema_math.subsume_col()] == SUBSUMED;
-            f(FunctionRow { vals: &row[0..schema_math.func_cols], subsumed })
+            f(FunctionRow {
+                vals: &row[0..schema_math.func_cols],
+                subsumed,
+            })
         });
     }
 
@@ -1236,22 +1223,19 @@ impl ResolvedMergeFn {
 /// the `args` in [`Lookup::run`] are not already present in the table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Lookup {
-    table: TableId,
-    table_math: SchemaMath,
+    table_id: TableId,
+    schema_math: SchemaMath,
     default: Option<MergeVal>,
     timestamp: CounterId,
 }
 
 impl Lookup {
     pub fn new(egraph: &EGraph, func: FunctionId) -> Lookup {
+        let (table_id, schema_math) = egraph.get_func_info(func);
         let func_info = &egraph.funcs[func];
         Lookup {
-            table: func_info.table,
-            table_math: SchemaMath {
-                func_cols: func_info.schema.len(),
-                subsume: func_info.can_subsume,
-                tracing: egraph.tracing,
-            },
+            table_id,
+            schema_math,
             default: match &func_info.default_val {
                 DefaultVal::FreshId => Some(MergeVal::Counter(egraph.id_counter)),
                 DefaultVal::Fail => None,
@@ -1262,7 +1246,7 @@ impl Lookup {
     }
 
     pub fn run(&self, state: &mut ExecutionState, args: &[Value]) -> Option<Value> {
-        assert!(!self.table_math.tracing, "proofs not supported yet");
+        assert!(!self.schema_math.tracing, "proofs not supported yet");
         match self.default {
             Some(default) => {
                 let timestamp =
@@ -1270,7 +1254,7 @@ impl Lookup {
                 let mut merge_vals = SmallVec::<[MergeVal; 3]>::new();
                 SchemaMath {
                     func_cols: 1,
-                    ..self.table_math
+                    ..self.schema_math
                 }
                 .write_table_row(
                     &mut merge_vals,
@@ -1278,21 +1262,21 @@ impl Lookup {
                         timestamp,
                         proof: None,
                         subsume: self
-                            .table_math
+                            .schema_math
                             .subsume
                             .then_some(MergeVal::Constant(NOT_SUBSUMED)),
                         ret_val: Some(default),
                     },
                 );
                 Some(
-                    state.predict_val(self.table, args, merge_vals.iter().copied())
-                        [self.table_math.ret_val_col()],
+                    state.predict_val(self.table_id, args, merge_vals.iter().copied())
+                        [self.schema_math.ret_val_col()],
                 )
             }
             None => state
-                .get_table(self.table)
+                .get_table(self.table_id)
                 .get_row(args)
-                .map(|row| row.vals[self.table_math.ret_val_col()]),
+                .map(|row| row.vals[self.schema_math.ret_val_col()]),
         }
     }
 }
@@ -1415,7 +1399,7 @@ fn combine_subsumed(v1: Value, v2: Value) -> Value {
 /// Where there are `n+1` key columns and columns marked with a question mark are optional,
 /// depending on the egraph and table-level configuration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-struct SchemaMath {
+pub struct SchemaMath {
     /// Whether or not proofs are enabled.
     tracing: bool,
     /// Whether or not the table is enabled for subsumption.
@@ -1426,7 +1410,7 @@ struct SchemaMath {
 
 /// A struct containing possible non-key portions of a table row. To be used with
 /// [`SchemaMath::write_table_row`].
-/// 
+///
 /// This is not to be confused with [`FunctionRow`], which is higher-level and for public uses.
 struct RowVals<T> {
     /// The timestamp for the row.
@@ -1481,21 +1465,21 @@ impl SchemaMath {
         }
     }
 
-    fn num_keys(&self) -> usize {
+    pub fn num_keys(&self) -> usize {
         self.func_cols - 1
     }
 
-    fn table_columns(&self) -> usize {
+    pub fn table_columns(&self) -> usize {
         self.func_cols + 1 /* timestamp */ + if self.tracing { 1 } else { 0 } + if self.subsume { 1 } else { 0 }
     }
 
     #[track_caller]
-    fn proof_id_col(&self) -> usize {
+    pub fn proof_id_col(&self) -> usize {
         assert!(self.tracing);
         self.func_cols + 1
     }
 
-    fn ret_val_col(&self) -> usize {
+    pub fn ret_val_col(&self) -> usize {
         self.func_cols - 1
     }
 
@@ -1504,7 +1488,7 @@ impl SchemaMath {
     }
 
     #[track_caller]
-    fn subsume_col(&self) -> usize {
+    pub fn subsume_col(&self) -> usize {
         assert!(self.subsume);
         if self.tracing {
             self.func_cols + 2
