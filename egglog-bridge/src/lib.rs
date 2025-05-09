@@ -1382,8 +1382,8 @@ fn incremental_rebuild(uf_size: usize, table_size: usize, parallel: bool) -> boo
     }
 }
 
-pub(crate) const SUBSUMED: Value = Value::new_const(1);
-pub(crate) const NOT_SUBSUMED: Value = Value::new_const(0);
+pub const SUBSUMED: Value = Value::new_const(1);
+pub const NOT_SUBSUMED: Value = Value::new_const(0);
 fn combine_subsumed(v1: Value, v2: Value) -> Value {
     std::cmp::max(v1, v2)
 }
