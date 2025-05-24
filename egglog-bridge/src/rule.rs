@@ -73,7 +73,7 @@ impl QueryEntry {
             QueryEntry::Var { id, .. } => Entry::Placeholder(*id),
             QueryEntry::Const { val, ty } => {
                 let ColumnTy::Primitive(ty) = *ty else {
-                    panic!("expected primitive type, found {:?}", ty);
+                    panic!("expected primitive type, found {ty:?}");
                 };
                 let interned = *val;
 
