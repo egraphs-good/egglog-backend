@@ -146,7 +146,7 @@ impl<T> ReadOptimizedLock<T> {
                     let write_token = ReadToken::WriteOngoing(unblock_waiters.clone());
                     let readers_done = n.0.clone();
                     let prev = self.token.compare_and_swap(&guard, Arc::new(write_token));
-                    if prev.as_ref() as *const _ != guard.as_ref() as *const _ {
+                    if !std::ptr::eq(prev.as_ref(), guard.as_ref()) {
                         // CAS failed, retry.
                         continue;
                     }
