@@ -4,13 +4,14 @@ pub(crate) mod bitset;
 pub(crate) mod concurrent_vec;
 pub(crate) mod notification;
 pub mod parallel_writer;
-pub mod resettable_oncelock;
+pub(crate) mod resettable_oncelock;
 use arc_swap::{ArcSwap, Guard};
 
 pub use bitset::BitSet;
 pub use concurrent_vec::ConcurrentVec;
 pub use notification::Notification;
 pub use parallel_writer::ParallelVecWriter;
+pub use resettable_oncelock::ResettableOnceLock;
 
 #[cfg(test)]
 mod tests;
