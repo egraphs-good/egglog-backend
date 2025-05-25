@@ -13,6 +13,7 @@ use crate::common::{HashMap, InternTable, Value};
 
 #[cfg(test)]
 mod tests;
+mod unboxed;
 
 define_id!(pub PrimitiveId, u32, "an identifier for primitive types");
 
@@ -86,7 +87,7 @@ impl Primitives {
     }
 
     /// Get a reference to the primitive value represented by the given [`Value`].
-    pub fn unwrap_ref<P: Primitive>(&self, v: Value) -> impl Deref<Target = P> + '_ {
+    fn unwrap_ref<P: Primitive>(&self, v: Value) -> impl Deref<Target = P> + '_ {
         let id = self.get_ty::<P>();
         let table = self
             .tables

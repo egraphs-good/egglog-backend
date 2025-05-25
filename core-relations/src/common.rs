@@ -76,6 +76,10 @@ impl<K: Eq + Hash + Clone, V: NumericId> InternTable<K, V> {
             index: v.index(),
         }
     }
+
+    pub fn get_cloned(&self, v: V) -> K {
+        self.vals.read()[v.index()].clone()
+    }
 }
 
 fn hash_value(v: &impl Hash) -> u64 {
