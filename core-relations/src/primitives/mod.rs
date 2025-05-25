@@ -7,9 +7,9 @@ use std::{
     ops::Deref,
 };
 
-use numeric_id::{define_id, DenseIdMap};
+use numeric_id::{define_id, DenseIdMap, NumericId};
 
-use crate::common::{InternTable, Value};
+use crate::common::{HashMap, InternTable, Value};
 
 #[cfg(test)]
 mod tests;
@@ -50,14 +50,16 @@ impl Debug for PrimitivePrinter<'_> {
 /// A registry for primitive values and functions on them.
 #[derive(Clone, Default)]
 pub struct Primitives {
-    type_ids: InternTable<TypeId, PrimitiveId>,
+    type_ids: HashMap<TypeId, PrimitiveId>,
     tables: DenseIdMap<PrimitiveId, Box<dyn DynamicInternTable>>,
 }
 
 impl Primitives {
     /// Register the given type `P` as a primitive type in this registry.
     pub fn register_type<P: Primitive>(&mut self) -> PrimitiveId {
-        let id = self.get_ty::<P>();
+        let type_id = TypeId::of::<P>();
+        let next_primitive_id = PrimitiveId::from_usize(self.type_ids.len());
+        let id = *self.type_ids.entry(type_id).or_insert(next_primitive_id);
         self.tables
             .get_or_insert(id, || Box::<InternTable<P, Value>>::default());
         id
@@ -65,12 +67,12 @@ impl Primitives {
 
     /// Get the [`PrimitiveId`] for the given primitive type `P`.
     pub fn get_ty<P: Primitive>(&self) -> PrimitiveId {
-        self.type_ids.intern(&TypeId::of::<P>())
+        self.type_ids[&TypeId::of::<P>()]
     }
 
     /// Get the [`PrimitiveId`] for the given primitive type id.
     pub fn get_ty_by_id(&self, id: TypeId) -> PrimitiveId {
-        self.type_ids.intern(&id)
+        self.type_ids[&id]
     }
 
     /// Get a [`Value`] representing the given primitive `p`.
