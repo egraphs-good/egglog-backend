@@ -2,7 +2,7 @@
 
 use std::{
     iter, mem,
-    sync::{atomic::AtomicUsize, Arc},
+    sync::{atomic::AtomicUsize, Arc, OnceLock},
 };
 
 use numeric_id::{DenseIdMap, IdVec, NumericId};
@@ -54,7 +54,7 @@ impl Prober {
                 intersect_outer,
                 table,
             } => {
-                let mut sub = table.read().get_subset(key)?.to_owned(&self.pool);
+                let mut sub = table.get().unwrap().get_subset(key)?.to_owned(&self.pool);
                 if *intersect_outer {
                     sub.intersect(self.subset.as_ref(), &self.pool);
                     if sub.is_empty() {
@@ -68,7 +68,11 @@ impl Prober {
                 table,
             } => {
                 debug_assert_eq!(key.len(), 1);
-                let mut sub = table.read().get_subset(&key[0])?.to_owned(&self.pool);
+                let mut sub = table
+                    .get()
+                    .unwrap()
+                    .get_subset(&key[0])?
+                    .to_owned(&self.pool);
                 if *intersect_outer {
                     sub.intersect(self.subset.as_ref(), &self.pool);
                     if sub.is_empty() {
@@ -88,7 +92,7 @@ impl Prober {
             DynamicIndex::Cached {
                 intersect_outer: true,
                 table,
-            } => table.read().for_each(|k, v| {
+            } => table.get().unwrap().for_each(|k, v| {
                 let mut res = v.to_owned(&self.pool);
                 res.intersect(self.subset.as_ref(), &self.pool);
                 if !res.is_empty() {
@@ -98,12 +102,12 @@ impl Prober {
             DynamicIndex::Cached {
                 intersect_outer: false,
                 table,
-            } => table.read().for_each(|k, v| f(k, v)),
+            } => table.get().unwrap().for_each(|k, v| f(k, v)),
             DynamicIndex::CachedColumn {
                 intersect_outer: true,
                 table,
             } => {
-                table.read().for_each(|k, v| {
+                table.get().unwrap().for_each(|k, v| {
                     let mut res = v.to_owned(&self.pool);
                     res.intersect(self.subset.as_ref(), &self.pool);
                     if !res.is_empty() {
@@ -115,7 +119,7 @@ impl Prober {
                 intersect_outer: false,
                 table,
             } => {
-                table.read().for_each(|k, v| f(&[*k], v));
+                table.get().unwrap().for_each(|k, v| f(&[*k], v));
             }
             DynamicIndex::Dynamic(tab) => {
                 tab.for_each(f);
@@ -128,8 +132,8 @@ impl Prober {
 
     fn len(&self) -> usize {
         match &self.ix {
-            DynamicIndex::Cached { table, .. } => table.read().len(),
-            DynamicIndex::CachedColumn { table, .. } => table.read().len(),
+            DynamicIndex::Cached { table, .. } => table.get().unwrap().len(),
+            DynamicIndex::CachedColumn { table, .. } => table.get().unwrap().len(),
             DynamicIndex::Dynamic(tab) => tab.len(),
             DynamicIndex::DynamicColumn(tab) => tab.len(),
         }
@@ -141,35 +145,74 @@ impl Database {
     ///
     /// This can improve the parallelism of index rebuilding when running in
     /// parallel, though for serial execution there isn't really a point.
-    fn update_cached_indexes(&mut self) {
-        rayon::in_place_scope(|scope| {
+    pub(crate) fn update_cached_indexes(&mut self) {
+        fn do_parallel() -> bool {
+            #[cfg(debug_assertions)]
+            {
+                use rand::Rng;
+                rand::thread_rng().gen_bool(0.5)
+            }
+
+            #[cfg(not(debug_assertions))]
+            {
+                rayon::current_num_threads() > 1
+            }
+        }
+        if do_parallel() {
+            rayon::in_place_scope(|scope| {
+                for (_, info) in self.tables.iter_mut() {
+                    let table = &info.table;
+                    for mut ci in info.column_indexes.iter_mut() {
+                        let (_, v) = ci.pair_mut();
+                        if v.get().unwrap().needs_refresh(table.as_ref()) {
+                            let mut_lock = Arc::get_mut(v).unwrap();
+                            let mut val = mut_lock.take().unwrap();
+                            let inner = v.clone();
+                            scope.spawn(move |_| {
+                                val.refresh(table.as_ref());
+                                inner.set(val).ok().unwrap();
+                            });
+                        }
+                    }
+
+                    for mut ix in info.indexes.iter_mut() {
+                        let (_, v) = ix.pair_mut();
+                        if v.get().unwrap().needs_refresh(table.as_ref()) {
+                            let mut_lock = Arc::get_mut(v).unwrap();
+                            let mut val = mut_lock.take().unwrap();
+                            let inner = v.clone();
+                            scope.spawn(move |_| {
+                                val.refresh(table.as_ref());
+                                inner.set(val).ok().unwrap();
+                            });
+                        }
+                    }
+                }
+            });
+        } else {
             for (_, info) in self.tables.iter_mut() {
                 let table = &info.table;
-                for ci in info.column_indexes.iter_mut() {
-                    let (_, v) = ci.pair();
-                    let reader = v.read();
-                    if reader.needs_refresh(table.as_ref()) {
-                        mem::drop(reader);
-                        let v = v.clone();
-                        scope.spawn(move |_| {
-                            v.lock().refresh(table.as_ref());
-                        });
+                for mut ci in info.column_indexes.iter_mut() {
+                    let (_, v) = ci.pair_mut();
+                    if v.get().unwrap().needs_refresh(table.as_ref()) {
+                        let mut_lock = Arc::get_mut(v).unwrap();
+                        let mut val = mut_lock.take().unwrap();
+                        val.refresh(table.as_ref());
+                        v.set(val).ok().unwrap();
                     }
                 }
 
-                for ix in info.indexes.iter_mut() {
-                    let (_, v) = ix.pair();
-                    let reader = v.read();
-                    if reader.needs_refresh(table.as_ref()) {
-                        mem::drop(reader);
-                        let v = v.clone();
-                        scope.spawn(move |_| {
-                            v.lock().refresh(table.as_ref());
-                        });
+                for mut ix in info.indexes.iter_mut() {
+                    let (_, v) = ix.pair_mut();
+                    if v.get().unwrap().needs_refresh(table.as_ref()) {
+                        let mut_lock = Arc::get_mut(v).unwrap();
+                        let mut val = mut_lock.take().unwrap();
+                        val.refresh(table.as_ref());
+                        v.set(val).ok().unwrap();
                     }
                 }
             }
-        });
+        }
     }
 
     pub fn run_rule_set(&mut self, rule_set: &RuleSet) -> RuleSetReport {
@@ -194,8 +237,8 @@ impl Database {
 
         let search_and_apply_timer = Instant::now();
         let rule_reports = DashMap::default();
+        self.update_cached_indexes();
         if do_parallel() {
-            self.update_cached_indexes();
             rayon::in_place_scope(|scope| {
                 for (plan, desc, _action) in &rule_set.plans {
                     scope.spawn(|scope| {
