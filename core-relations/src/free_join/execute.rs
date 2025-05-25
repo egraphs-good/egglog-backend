@@ -2,7 +2,7 @@
 
 use std::{
     iter, mem,
-    sync::{atomic::AtomicUsize, Arc, OnceLock},
+    sync::{atomic::AtomicUsize, Arc},
 };
 
 use numeric_id::{DenseIdMap, IdVec, NumericId};
@@ -146,73 +146,28 @@ impl Database {
     /// This can improve the parallelism of index rebuilding when running in
     /// parallel, though for serial execution there isn't really a point.
     pub(crate) fn update_cached_indexes(&mut self) {
-        fn do_parallel() -> bool {
-            #[cfg(debug_assertions)]
-            {
-                use rand::Rng;
-                rand::thread_rng().gen_bool(0.5)
-            }
-
-            #[cfg(not(debug_assertions))]
-            {
-                rayon::current_num_threads() > 1
-            }
-        }
-        if do_parallel() {
-            rayon::in_place_scope(|scope| {
-                for (_, info) in self.tables.iter_mut() {
-                    let table = &info.table;
-                    for mut ci in info.column_indexes.iter_mut() {
-                        let (_, v) = ci.pair_mut();
-                        if v.get().unwrap().needs_refresh(table.as_ref()) {
-                            let mut_lock = Arc::get_mut(v).unwrap();
-                            let mut val = mut_lock.take().unwrap();
-                            let inner = v.clone();
-                            scope.spawn(move |_| {
-                                val.refresh(table.as_ref());
-                                inner.set(val).ok().unwrap();
-                            });
-                        }
-                    }
-
-                    for mut ix in info.indexes.iter_mut() {
-                        let (_, v) = ix.pair_mut();
-                        if v.get().unwrap().needs_refresh(table.as_ref()) {
-                            let mut_lock = Arc::get_mut(v).unwrap();
-                            let mut val = mut_lock.take().unwrap();
-                            let inner = v.clone();
-                            scope.spawn(move |_| {
-                                val.refresh(table.as_ref());
-                                inner.set(val).ok().unwrap();
-                            });
-                        }
-                    }
-                }
-            });
-        } else {
+        rayon::in_place_scope(|scope| {
             for (_, info) in self.tables.iter_mut() {
                 let table = &info.table;
-                for mut ci in info.column_indexes.iter_mut() {
-                    let (_, v) = ci.pair_mut();
-                    if v.get().unwrap().needs_refresh(table.as_ref()) {
-                        let mut_lock = Arc::get_mut(v).unwrap();
-                        let mut val = mut_lock.take().unwrap();
-                        val.refresh(table.as_ref());
-                        v.set(val).ok().unwrap();
-                    }
+                for ci in info.column_indexes.iter_mut() {
+                    let index: Arc<_> = ci.clone();
+                    scope.spawn(move |_| {
+                        index.get_or_update(|index| {
+                            index.refresh(table.as_ref());
+                        });
+                    });
                 }
 
-                for mut ix in info.indexes.iter_mut() {
-                    let (_, v) = ix.pair_mut();
-                    if v.get().unwrap().needs_refresh(table.as_ref()) {
-                        let mut_lock = Arc::get_mut(v).unwrap();
-                        let mut val = mut_lock.take().unwrap();
-                        val.refresh(table.as_ref());
-                        v.set(val).ok().unwrap();
-                    }
+                for ti in info.indexes.iter_mut() {
+                    let index: Arc<_> = ti.clone();
+                    scope.spawn(move |_| {
+                        index.get_or_update(|index| {
+                            index.refresh(table.as_ref());
+                        });
+                    });
                 }
             }
-        }
+        });
     }
 
     pub fn run_rule_set(&mut self, rule_set: &RuleSet) -> RuleSetReport {
@@ -237,8 +192,8 @@ impl Database {
 
         let search_and_apply_timer = Instant::now();
         let rule_reports = DashMap::default();
-        self.update_cached_indexes();
         if do_parallel() {
+            self.update_cached_indexes();
             rayon::in_place_scope(|scope| {
                 for (plan, desc, _action) in &rule_set.plans {
                     scope.spawn(|scope| {
