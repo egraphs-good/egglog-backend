@@ -3,10 +3,11 @@ use std::{
     mem,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, OnceLock,
+        Arc,
     },
 };
 
+use concurrency::ResettableOnceLock;
 use numeric_id::{define_id, DenseIdMap, DenseIdMapWithReuse, NumericId};
 use rayon::prelude::*;
 use smallvec::SmallVec;
@@ -101,8 +102,8 @@ pub(crate) struct VarInfo {
     pub(crate) used_in_rhs: bool,
 }
 
-pub(crate) type HashIndex = Arc<OnceLock<Index<TupleIndex>>>;
-pub(crate) type HashColumnIndex = Arc<OnceLock<Index<ColumnIndex>>>;
+pub(crate) type HashIndex = Arc<ResettableOnceLock<Index<TupleIndex>>>;
+pub(crate) type HashColumnIndex = Arc<ResettableOnceLock<Index<ColumnIndex>>>;
 
 pub struct TableInfo {
     pub(crate) spec: TableSpec,
@@ -114,16 +115,15 @@ pub struct TableInfo {
 impl Clone for TableInfo {
     fn clone(&self) -> Self {
         fn deep_clone_map<K: Clone + std::hash::Hash + Eq, TI: Clone>(
-            map: &DashMap<K, Arc<OnceLock<TI>>>,
-        ) -> DashMap<K, Arc<OnceLock<TI>>> {
+            map: &DashMap<K, Arc<ResettableOnceLock<TI>>>,
+        ) -> DashMap<K, Arc<ResettableOnceLock<TI>>> {
             map.iter()
                 .map(|table_ref| {
                     let (k, v) = table_ref.pair();
-                    let res = (k.clone(), Arc::new(OnceLock::new()));
-                    if let Some(x) = v.get() {
-                        res.1.set(x.clone()).ok().unwrap();
-                    }
-                    res
+                    (
+                        k.clone(),
+                        Arc::new(ResettableOnceLock::new(v.get().unwrap().clone())),
+                    )
                 })
                 .collect()
         }
@@ -525,6 +525,15 @@ impl Database {
                 break;
             }
         }
+        // Reset all indexes to force an update on the next access.
+        for (_, info) in self.tables.iter_mut() {
+            for mut ci in info.column_indexes.iter_mut() {
+                Arc::get_mut(ci.pair_mut().1).unwrap().reset();
+            }
+            for mut ti in info.indexes.iter_mut() {
+                Arc::get_mut(ti.pair_mut().1).unwrap().reset();
+            }
+        }
         ever_changed
     }
 
@@ -665,12 +674,15 @@ fn get_index_from_tableinfo(table_info: &TableInfo, cols: &[ColumnId]) -> HashIn
     let index: Arc<_> = table_info
         .indexes
         .entry(cols.into())
-        .or_insert_with(|| Arc::new(OnceLock::new()))
+        .or_insert_with(|| {
+            Arc::new(ResettableOnceLock::new(Index::new(
+                cols.to_vec(),
+                TupleIndex::new(cols.len()),
+            )))
+        })
         .clone();
-    index.get_or_init(|| {
-        let mut index = Index::new(cols.to_vec(), TupleIndex::new(cols.len()));
+    index.get_or_update(|index| {
         index.refresh(table_info.table.as_ref());
-        index
     });
     debug_assert!(!index
         .get()
@@ -686,12 +698,15 @@ fn get_column_index_from_tableinfo(table_info: &TableInfo, col: ColumnId) -> Has
     let index: Arc<_> = table_info
         .column_indexes
         .entry(col)
-        .or_insert_with(|| Arc::new(OnceLock::new()))
+        .or_insert_with(|| {
+            Arc::new(ResettableOnceLock::new(Index::new(
+                vec![col],
+                ColumnIndex::new(),
+            )))
+        })
         .clone();
-    index.get_or_init(|| {
-        let mut index = Index::new(vec![col], ColumnIndex::new());
+    index.get_or_update(|index| {
         index.refresh(table_info.table.as_ref());
-        index
     });
     debug_assert!(!index
         .get()
