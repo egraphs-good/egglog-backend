@@ -20,8 +20,8 @@ use std::{
 use core_relations::{
     ColumnId, Constraint, Container, Containers, CounterId, Database, DisplacedTable,
     DisplacedTableWithProvenance, ExecutionState, ExternalFunction, ExternalFunctionId, MergeVal,
-    Offset, PlanStrategy, PrimitiveId, Primitives, RuleSetReport, SortedWritesTable, TableId,
-    TaggedRowBuffer, Value, WrappedTable,
+    Offset, PlanStrategy, Primitive, PrimitiveId, Primitives, RuleSetReport, SortedWritesTable,
+    TableId, TaggedRowBuffer, Value, WrappedTable,
 };
 use hashbrown::HashMap;
 use indexmap::{map::Entry, IndexMap, IndexSet};
@@ -209,7 +209,7 @@ impl EGraph {
     /// Create a [`QueryEntry`] for a primitive value.
     pub fn primitive_constant<T>(&self, x: T) -> QueryEntry
     where
-        T: Clone + Debug + Eq + Hash + Send + Sync + 'static,
+        T: Primitive,
     {
         QueryEntry::Const {
             val: self.primitives().get(x),
