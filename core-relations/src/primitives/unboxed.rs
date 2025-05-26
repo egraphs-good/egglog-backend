@@ -5,13 +5,14 @@
 
 use numeric_id::NumericId;
 
-use crate::{common::InternTable, Value};
+use crate::Value;
 
 use super::Primitive;
 
 macro_rules! impl_small_primitive {
     ($ty:ty) => {
         impl Primitive for $ty {
+            const MAY_UNBOX: bool = true;
             fn try_unbox(val: Value) -> Option<Self> {
                 Some(val.rep() as $ty)
             }
@@ -52,6 +53,7 @@ const VAL_MASK: u32 = 1 << (VAL_BITS - 1);
 macro_rules! impl_medium_primitive {
     ($ty:ty) => {
         impl Primitive for $ty {
+            const MAY_UNBOX: bool = true;
             fn try_box(&self) -> Option<Value> {
                 if *self & (VAL_MASK-1) as $ty == *self {
                     // If the top bit is clear, we can box it directly.

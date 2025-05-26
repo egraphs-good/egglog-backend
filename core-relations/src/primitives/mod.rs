@@ -22,13 +22,13 @@ define_id!(pub PrimitiveId, u32, "an identifier for primitive types");
 /// For types that are particularly small, users can override the `try_box` and `try_unbox`
 /// methods.
 pub trait Primitive: Clone + Hash + Eq + Any + Debug + Send + Sync {
+    const MAY_UNBOX: bool = false;
     fn intern(&self, table: &InternTable<Self, Value>) -> Value {
         table.intern(self)
     }
     fn as_any(&self) -> &dyn Any {
         self
     }
-
     fn try_box(&self) -> Option<Value> {
         None
     }
@@ -39,6 +39,9 @@ pub trait Primitive: Clone + Hash + Eq + Any + Debug + Send + Sync {
 
 impl Primitive for String {}
 impl Primitive for &'static str {}
+impl Primitive for num_rational::BigRational {}
+impl Primitive for num_rational::Rational64 {}
+impl Primitive for num_rational::Rational32 {}
 
 /// A wrapper used to print a primitive value.
 ///
@@ -94,19 +97,6 @@ impl Primitives {
         table.intern(p)
     }
 
-    /// Get a reference to the primitive value represented by the given [`Value`].
-    // fn unwrap_ref<P: Primitive>(&self, v: Value) -> impl Deref<Target = P> + '_ {
-    //     let id = self.get_ty::<P>();
-    //     let table = self
-    //         .tables
-    //         .get(id)
-    //         .expect("types must be registered before unwrapping")
-    //         .as_any()
-    //         .downcast_ref::<InternTable<P, Value>>()
-    //         .unwrap();
-    //     table.get(v)
-    // }
-
     pub fn unwrap<P: Primitive>(&self, v: Value) -> P {
         let id = self.get_ty::<P>();
         let table = self
@@ -152,21 +142,34 @@ impl<P: Primitive> DynamicInternTable for PrimitiveInternTable<P> {
     }
 }
 
+const VAL_OFFSET: u32 = 1 << (std::mem::size_of::<Value>() as u32 * 8 - 1);
+
 impl<P: Primitive> PrimitiveInternTable<P> {
-    pub fn new() -> Self {
-        Self {
-            table: InternTable::default(),
+    pub fn intern(&self, p: P) -> Value {
+        if P::MAY_UNBOX {
+            p.try_box().unwrap_or_else(|| {
+                // If the primitive type is too large to fit in a Value, we intern it and return
+                // the corresponding Value with its top bit set. We use add to ensure we overflow
+                // if the number of interned values is too large.
+                Value::new(
+                    self.table
+                        .intern(&p)
+                        .rep()
+                        .checked_add(VAL_OFFSET)
+                        .expect("interned value overflowed"),
+                )
+            })
+        } else {
+            self.table.intern(&p)
         }
     }
 
-    pub fn intern(&self, p: P) -> Value {
-        p.try_box().unwrap_or_else(|| {
-            // If the primitive type is too large to fit in a Value, we intern it.
-            self.table.intern(&p)
-        })
-    }
-
     pub fn get(&self, v: Value) -> P {
-        P::try_unbox(v).unwrap_or_else(|| self.table.get_cloned(v))
+        if P::MAY_UNBOX {
+            P::try_unbox(v)
+                .unwrap_or_else(|| self.table.get_cloned(Value::new(v.rep() - VAL_OFFSET)))
+        } else {
+            self.table.get_cloned(v)
+        }
     }
 }
