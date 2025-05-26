@@ -18,14 +18,16 @@ use crate::{
         mask::{Mask, MaskIter, ValueSource},
         Bindings, DbView,
     },
-    common::DashMap,
+    common::{iter_dashmap_bulk, DashMap},
     dependency_graph::DependencyGraph,
-    hash_index::{ColumnIndex, Index},
+    hash_index::{ColumnIndex, Index, IndexBase},
     offsets::Subset,
     pool::{with_pool_set, Pool, Pooled},
     primitives::Primitives,
     query::{Query, RuleSetBuilder},
-    table_spec::{ColumnId, Constraint, MutationBuffer, Table, TableSpec, WrappedTable},
+    table_spec::{
+        ColumnId, Constraint, MutationBuffer, Table, TableSpec, WrappedTable, WrappedTableRef,
+    },
     Containers, PoolSet, QueryEntry, TupleIndex, Value,
 };
 
@@ -114,24 +116,27 @@ pub struct TableInfo {
 
 impl Clone for TableInfo {
     fn clone(&self) -> Self {
-        fn deep_clone_map<K: Clone + std::hash::Hash + Eq, TI: Clone>(
-            map: &DashMap<K, Arc<ResettableOnceLock<TI>>>,
-        ) -> DashMap<K, Arc<ResettableOnceLock<TI>>> {
+        fn deep_clone_map<K: Clone + std::hash::Hash + Eq, TI: IndexBase + Clone>(
+            map: &DashMap<K, Arc<ResettableOnceLock<Index<TI>>>>,
+            table: WrappedTableRef,
+        ) -> DashMap<K, Arc<ResettableOnceLock<Index<TI>>>> {
             map.iter()
                 .map(|table_ref| {
                     let (k, v) = table_ref.pair();
-                    (
-                        k.clone(),
-                        Arc::new(ResettableOnceLock::new(v.get().unwrap().clone())),
-                    )
+                    let v: Index<TI> = v
+                        .get_or_update(|index| {
+                            index.refresh(table);
+                        })
+                        .clone();
+                    (k.clone(), Arc::new(ResettableOnceLock::new(v)))
                 })
                 .collect()
         }
         TableInfo {
             spec: self.spec.clone(),
             table: self.table.dyn_clone(),
-            indexes: deep_clone_map(&self.indexes),
-            column_indexes: deep_clone_map(&self.column_indexes),
+            indexes: deep_clone_map(&self.indexes, self.table.as_ref()),
+            column_indexes: deep_clone_map(&self.column_indexes, self.table.as_ref()),
         }
     }
 }
@@ -186,6 +191,7 @@ pub(crate) trait ExternalFunctionExt: ExternalFunction {
     ) {
         let pool: Pool<Vec<Value>> = with_pool_set(|ps| ps.get_pool().clone());
         let mut out = pool.get();
+        out.reserve(mask.len());
         mask.iter_dynamic(
             pool,
             args.iter().map(|v| match v {
@@ -527,12 +533,12 @@ impl Database {
         }
         // Reset all indexes to force an update on the next access.
         for (_, info) in self.tables.iter_mut() {
-            for mut ci in info.column_indexes.iter_mut() {
-                Arc::get_mut(ci.pair_mut().1).unwrap().reset();
-            }
-            for mut ti in info.indexes.iter_mut() {
-                Arc::get_mut(ti.pair_mut().1).unwrap().reset();
-            }
+            iter_dashmap_bulk(&mut info.column_indexes, |_, ci| {
+                Arc::get_mut(ci).unwrap().reset();
+            });
+            iter_dashmap_bulk(&mut info.indexes, |_, ti| {
+                Arc::get_mut(ti).unwrap().reset();
+            });
         }
         ever_changed
     }

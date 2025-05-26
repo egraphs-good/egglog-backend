@@ -7,6 +7,7 @@ use std::{
 };
 
 use numeric_id::{define_id, DenseIdMap, NumericId};
+use ordered_float::OrderedFloat;
 
 use crate::common::{HashMap, InternTable, Value};
 
@@ -39,9 +40,12 @@ pub trait Primitive: Clone + Hash + Eq + Any + Debug + Send + Sync {
 
 impl Primitive for String {}
 impl Primitive for &'static str {}
-impl Primitive for num_rational::BigRational {}
-impl Primitive for num_rational::Rational64 {}
-impl Primitive for num_rational::Rational32 {}
+impl Primitive for num::BigRational {}
+impl Primitive for num::Rational64 {}
+impl Primitive for num::Rational32 {}
+impl Primitive for num::BigInt {}
+impl Primitive for OrderedFloat<f32> {}
+impl Primitive for OrderedFloat<f64> {}
 
 /// A wrapper used to print a primitive value.
 ///
@@ -89,6 +93,11 @@ impl Primitives {
 
     /// Get a [`Value`] representing the given primitive `p`.
     pub fn get<P: Primitive>(&self, p: P) -> Value {
+        if P::MAY_UNBOX {
+            if let Some(v) = p.try_box() {
+                return v;
+            }
+        }
         let id = self.get_ty::<P>();
         let table = self.tables[id]
             .as_any()
@@ -98,6 +107,11 @@ impl Primitives {
     }
 
     pub fn unwrap<P: Primitive>(&self, v: Value) -> P {
+        if P::MAY_UNBOX {
+            if let Some(p) = P::try_unbox(v) {
+                return p;
+            }
+        }
         let id = self.get_ty::<P>();
         let table = self
             .tables
