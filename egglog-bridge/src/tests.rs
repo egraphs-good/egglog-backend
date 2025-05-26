@@ -1,6 +1,7 @@
 use std::{
     fmt::Debug,
     hash::Hash,
+    slice,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -970,7 +971,7 @@ fn mergefn_nested_function() {
 
     let write_rule = {
         let mut rb = egraph.new_rule("write_rule", true);
-        rb.lookup(f_table, &[value_1.clone()], String::new);
+        rb.lookup(f_table, slice::from_ref(&value_1), String::new);
         rb.lookup(f_table, &[value_2], String::new);
         rb.build()
     };
@@ -1260,15 +1261,15 @@ fn basic_subsumption() {
     let value_3 = egraph.primitive_constant(3i64);
     let write_f = {
         let mut rb = egraph.new_rule("write_f", true);
-        rb.lookup(f_table, &[value_1.clone()], String::new);
-        rb.lookup(f_table, &[value_2.clone()], String::new);
+        rb.lookup(f_table, slice::from_ref(&value_1), String::new);
+        rb.lookup(f_table, slice::from_ref(&value_2), String::new);
         rb.build()
     };
 
     let subsume_f = {
         let mut rb = egraph.new_rule("write_f", true);
-        rb.subsume(f_table, &[value_2.clone()]);
-        rb.subsume(f_table, &[value_3.clone()]);
+        rb.subsume(f_table, slice::from_ref(&value_2));
+        rb.subsume(f_table, slice::from_ref(&value_3));
         rb.build()
     };
 
@@ -1345,14 +1346,14 @@ fn lookup_failure_panics() {
 
     let lookup_success = {
         let mut rb = egraph.new_rule("lookup_success", true);
-        rb.lookup(f, &[value_1.clone()], String::new);
+        rb.lookup(f, slice::from_ref(&value_1), String::new);
         rb.build()
     };
     egraph.run_rules(&[lookup_success]).unwrap();
 
     let lookup_failure = {
         let mut rb = egraph.new_rule("lookup_fail", true);
-        rb.lookup(f, &[value_3.clone()], String::new);
+        rb.lookup(f, slice::from_ref(&value_3), String::new);
         rb.build()
     };
     egraph.run_rules(&[lookup_failure]).err().unwrap();
@@ -1385,13 +1386,13 @@ fn primitive_failure_panics() {
         let mut rb = egraph.new_rule("assert_odd", true);
         rb.call_external_func(
             assert_odd,
-            &[value_1.clone()],
+            slice::from_ref(&value_1),
             ColumnTy::Primitive(unit_prim),
             "",
         );
         rb.call_external_func(
             assert_odd,
-            &[value_2.clone()],
+            slice::from_ref(&value_2),
             ColumnTy::Primitive(unit_prim),
             "",
         );
