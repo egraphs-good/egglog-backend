@@ -9,17 +9,14 @@ use crate::{common::InternTable, Value};
 
 use super::Primitive;
 
-trait UnboxedPrimitive: Primitive {
-    fn try_unbox(val: Value) -> Option<Self>
-    where
-        Self: Sized;
-}
-
 macro_rules! impl_small_primitive {
     ($ty:ty) => {
-        impl UnboxedPrimitive for $ty {
+        impl Primitive for $ty {
             fn try_unbox(val: Value) -> Option<Self> {
                 Some(val.rep() as $ty)
+            }
+            fn try_box(&self) -> Option<Value> {
+                Some(Value::new(*self as u32))
             }
         }
     };
@@ -31,9 +28,21 @@ macro_rules! impl_small_primitive {
 
 impl_small_primitive!(u8, u16, u32, i8, i16, i32);
 
-impl UnboxedPrimitive for bool {
+impl Primitive for bool {
     fn try_unbox(val: Value) -> Option<Self> {
         Some(val.rep() != 0)
+    }
+    fn try_box(&self) -> Option<Value> {
+        Some(Value::new(if *self { 1 } else { 0 }))
+    }
+}
+
+impl Primitive for () {
+    fn try_unbox(_val: Value) -> Option<Self> {
+        Some(())
+    }
+    fn try_box(&self) -> Option<Value> {
+        Some(Value::new(0))
     }
 }
 
@@ -42,7 +51,16 @@ const VAL_MASK: u32 = 1 << (VAL_BITS - 1);
 
 macro_rules! impl_medium_primitive {
     ($ty:ty) => {
-        impl UnboxedPrimitive for $ty {
+        impl Primitive for $ty {
+            fn try_box(&self) -> Option<Value> {
+                if *self & (VAL_MASK-1) as $ty == *self {
+                    // If the top bit is clear, we can box it directly.
+                    Some(Value::new(*self as u32))
+                } else {
+                    // If the top bit is set, we need to intern it.
+                    None
+                }
+            }
             fn try_unbox(val: Value) -> Option<Self> {
                 let top_bit_clear = val.rep() & VAL_MASK == 0;
                 if top_bit_clear {
@@ -61,8 +79,4 @@ macro_rules! impl_medium_primitive {
     };
 }
 
-impl_medium_primitive!(u64, i64);
-
-pub(super) struct UnboxedInternTable<K, V> {
-    pub(crate) table: InternTable<K, V>,
-}
+impl_medium_primitive!(u64, i64, usize, isize);

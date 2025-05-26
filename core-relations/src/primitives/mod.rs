@@ -4,7 +4,6 @@ use std::{
     any::{Any, TypeId},
     fmt::{self, Debug},
     hash::Hash,
-    ops::Deref,
 };
 
 use numeric_id::{define_id, DenseIdMap, NumericId};
@@ -19,8 +18,9 @@ define_id!(pub PrimitiveId, u32, "an identifier for primitive types");
 
 /// A simple primitive type that can be interned in a database.
 ///
-/// No one needs to implement this trait directly: any type with the trait requirements implements
-/// it automatically.
+/// Most callers can simply implement this trait on their desired type, with no overrides needed.
+/// For types that are particularly small, users can override the `try_box` and `try_unbox`
+/// methods.
 pub trait Primitive: Clone + Hash + Eq + Any + Debug + Send + Sync {
     fn intern(&self, table: &InternTable<Self, Value>) -> Value {
         table.intern(self)
@@ -28,9 +28,17 @@ pub trait Primitive: Clone + Hash + Eq + Any + Debug + Send + Sync {
     fn as_any(&self) -> &dyn Any {
         self
     }
+
+    fn try_box(&self) -> Option<Value> {
+        None
+    }
+    fn try_unbox(_val: Value) -> Option<Self> {
+        None
+    }
 }
 
-impl<T: Clone + Hash + Eq + Any + Debug + Send + Sync> Primitive for T {}
+impl Primitive for String {}
+impl Primitive for &'static str {}
 
 /// A wrapper used to print a primitive value.
 ///
@@ -62,7 +70,7 @@ impl Primitives {
         let next_primitive_id = PrimitiveId::from_usize(self.type_ids.len());
         let id = *self.type_ids.entry(type_id).or_insert(next_primitive_id);
         self.tables
-            .get_or_insert(id, || Box::<InternTable<P, Value>>::default());
+            .get_or_insert(id, || Box::<PrimitiveInternTable<P>>::default());
         id
     }
 
@@ -81,26 +89,34 @@ impl Primitives {
         let id = self.get_ty::<P>();
         let table = self.tables[id]
             .as_any()
-            .downcast_ref::<InternTable<P, Value>>()
+            .downcast_ref::<PrimitiveInternTable<P>>()
             .unwrap();
-        p.intern(table)
+        table.intern(p)
     }
 
     /// Get a reference to the primitive value represented by the given [`Value`].
-    fn unwrap_ref<P: Primitive>(&self, v: Value) -> impl Deref<Target = P> + '_ {
+    // fn unwrap_ref<P: Primitive>(&self, v: Value) -> impl Deref<Target = P> + '_ {
+    //     let id = self.get_ty::<P>();
+    //     let table = self
+    //         .tables
+    //         .get(id)
+    //         .expect("types must be registered before unwrapping")
+    //         .as_any()
+    //         .downcast_ref::<InternTable<P, Value>>()
+    //         .unwrap();
+    //     table.get(v)
+    // }
+
+    pub fn unwrap<P: Primitive>(&self, v: Value) -> P {
         let id = self.get_ty::<P>();
         let table = self
             .tables
             .get(id)
             .expect("types must be registered before unwrapping")
             .as_any()
-            .downcast_ref::<InternTable<P, Value>>()
+            .downcast_ref::<PrimitiveInternTable<P>>()
             .unwrap();
         table.get(v)
-    }
-
-    pub fn unwrap<P: Primitive>(&self, v: Value) -> P {
-        self.unwrap_ref::<P>(v).clone()
     }
 }
 
@@ -112,13 +128,45 @@ trait DynamicInternTable: Any + dyn_clone::DynClone + Send + Sync {
 // Implements `Clone` for `Box<dyn DynamicInternTable>`.
 dyn_clone::clone_trait_object!(DynamicInternTable);
 
-impl<P: Primitive> DynamicInternTable for InternTable<P, Value> {
+#[derive(Clone)]
+struct PrimitiveInternTable<P> {
+    table: InternTable<P, Value>,
+}
+
+impl<P> Default for PrimitiveInternTable<P> {
+    fn default() -> Self {
+        Self {
+            table: InternTable::default(),
+        }
+    }
+}
+
+impl<P: Primitive> DynamicInternTable for PrimitiveInternTable<P> {
     fn as_any(&self) -> &dyn Any {
         self
     }
 
     fn print_value(&self, val: Value, f: &mut fmt::Formatter) -> fmt::Result {
         let p = self.get(val);
-        write!(f, "{:?}", &*p)
+        write!(f, "{p:?}")
+    }
+}
+
+impl<P: Primitive> PrimitiveInternTable<P> {
+    pub fn new() -> Self {
+        Self {
+            table: InternTable::default(),
+        }
+    }
+
+    pub fn intern(&self, p: P) -> Value {
+        p.try_box().unwrap_or_else(|| {
+            // If the primitive type is too large to fit in a Value, we intern it.
+            self.table.intern(&p)
+        })
+    }
+
+    pub fn get(&self, v: Value) -> P {
+        P::try_unbox(v).unwrap_or_else(|| self.table.get_cloned(v))
     }
 }
