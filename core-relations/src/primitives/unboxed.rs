@@ -3,6 +3,8 @@
 //!
 //! [`InternTable`]: crate::common::InternTable
 
+use std::num::NonZeroU32;
+
 use numeric_id::NumericId;
 
 use crate::Value;
@@ -30,6 +32,7 @@ macro_rules! impl_small_primitive {
 impl_small_primitive!(u8, u16, u32, i8, i16, i32);
 
 impl Primitive for bool {
+    const MAY_UNBOX: bool = true;
     fn try_unbox(val: Value) -> Option<Self> {
         Some(val.rep() != 0)
     }
@@ -39,11 +42,25 @@ impl Primitive for bool {
 }
 
 impl Primitive for () {
+    const MAY_UNBOX: bool = true;
     fn try_unbox(_val: Value) -> Option<Self> {
         Some(())
     }
     fn try_box(&self) -> Option<Value> {
         Some(Value::new(0))
+    }
+}
+
+impl Primitive for symbol_table::GlobalSymbol {
+    const MAY_UNBOX: bool = true;
+    fn try_unbox(val: Value) -> Option<Self> {
+        Some(symbol_table::GlobalSymbol::from(
+            NonZeroU32::new(val.rep()).unwrap(),
+        ))
+    }
+    fn try_box(&self) -> Option<Value> {
+        let x: NonZeroU32 = (*self).into();
+        Some(Value::new(x.into()))
     }
 }
 

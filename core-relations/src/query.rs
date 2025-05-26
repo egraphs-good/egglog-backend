@@ -45,7 +45,6 @@ pub struct RuleSetBuilder<'outer> {
 
 impl<'outer> RuleSetBuilder<'outer> {
     pub fn new(db: &'outer mut Database) -> Self {
-        db.update_cached_indexes();
         Self {
             rule_set: Default::default(),
             db,
