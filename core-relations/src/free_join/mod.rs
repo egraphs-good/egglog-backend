@@ -7,7 +7,7 @@ use std::{
     },
 };
 
-use concurrency::ReadOptimizedLock;
+use concurrency::ResettableOnceLock;
 use numeric_id::{define_id, DenseIdMap, DenseIdMapWithReuse, NumericId};
 use rayon::prelude::*;
 use smallvec::SmallVec;
@@ -18,14 +18,16 @@ use crate::{
         mask::{Mask, MaskIter, ValueSource},
         Bindings, DbView,
     },
-    common::DashMap,
+    common::{iter_dashmap_bulk, DashMap},
     dependency_graph::DependencyGraph,
-    hash_index::{ColumnIndex, Index},
+    hash_index::{ColumnIndex, Index, IndexBase},
     offsets::Subset,
     pool::{with_pool_set, Pool, Pooled},
     primitives::Primitives,
     query::{Query, RuleSetBuilder},
-    table_spec::{ColumnId, Constraint, MutationBuffer, Table, TableSpec, WrappedTable},
+    table_spec::{
+        ColumnId, Constraint, MutationBuffer, Table, TableSpec, WrappedTable, WrappedTableRef,
+    },
     Containers, PoolSet, QueryEntry, TupleIndex, Value,
 };
 
@@ -102,8 +104,8 @@ pub(crate) struct VarInfo {
     pub(crate) used_in_rhs: bool,
 }
 
-pub(crate) type HashIndex = Arc<ReadOptimizedLock<Index<TupleIndex>>>;
-pub(crate) type HashColumnIndex = Arc<ReadOptimizedLock<Index<ColumnIndex>>>;
+pub(crate) type HashIndex = Arc<ResettableOnceLock<Index<TupleIndex>>>;
+pub(crate) type HashColumnIndex = Arc<ResettableOnceLock<Index<ColumnIndex>>>;
 
 pub struct TableInfo {
     pub(crate) spec: TableSpec,
@@ -114,24 +116,27 @@ pub struct TableInfo {
 
 impl Clone for TableInfo {
     fn clone(&self) -> Self {
-        fn deep_clone_map<K: Clone + std::hash::Hash + Eq, TI: Clone>(
-            map: &DashMap<K, Arc<ReadOptimizedLock<TI>>>,
-        ) -> DashMap<K, Arc<ReadOptimizedLock<TI>>> {
+        fn deep_clone_map<K: Clone + std::hash::Hash + Eq, TI: IndexBase + Clone>(
+            map: &DashMap<K, Arc<ResettableOnceLock<Index<TI>>>>,
+            table: WrappedTableRef,
+        ) -> DashMap<K, Arc<ResettableOnceLock<Index<TI>>>> {
             map.iter()
                 .map(|table_ref| {
                     let (k, v) = table_ref.pair();
-                    (
-                        k.clone(),
-                        Arc::new(ReadOptimizedLock::new(v.read().clone())),
-                    )
+                    let v: Index<TI> = v
+                        .get_or_update(|index| {
+                            index.refresh(table);
+                        })
+                        .clone();
+                    (k.clone(), Arc::new(ResettableOnceLock::new(v)))
                 })
                 .collect()
         }
         TableInfo {
             spec: self.spec.clone(),
             table: self.table.dyn_clone(),
-            indexes: deep_clone_map(&self.indexes),
-            column_indexes: deep_clone_map(&self.column_indexes),
+            indexes: deep_clone_map(&self.indexes, self.table.as_ref()),
+            column_indexes: deep_clone_map(&self.column_indexes, self.table.as_ref()),
         }
     }
 }
@@ -186,6 +191,7 @@ pub(crate) trait ExternalFunctionExt: ExternalFunction {
     ) {
         let pool: Pool<Vec<Value>> = with_pool_set(|ps| ps.get_pool().clone());
         let mut out = pool.get();
+        out.reserve(mask.len());
         mask.iter_dynamic(
             pool,
             args.iter().map(|v| match v {
@@ -525,6 +531,15 @@ impl Database {
                 break;
             }
         }
+        // Reset all indexes to force an update on the next access.
+        for (_, info) in self.tables.iter_mut() {
+            iter_dashmap_bulk(&mut info.column_indexes, |_, ci| {
+                Arc::get_mut(ci).unwrap().reset();
+            });
+            iter_dashmap_bulk(&mut info.indexes, |_, ti| {
+                Arc::get_mut(ti).unwrap().reset();
+            });
+        }
         ever_changed
     }
 
@@ -616,7 +631,7 @@ impl Database {
             // 'fast'.
             fast.push(c.clone());
             let index = get_column_index_from_tableinfo(table_info, col);
-            match index.read().get_subset(&val) {
+            match index.get().unwrap().get_subset(&val) {
                 Some(s) => {
                     with_pool_set(|ps| subset.intersect(s, &ps.get_pool()));
                 }
@@ -666,18 +681,19 @@ fn get_index_from_tableinfo(table_info: &TableInfo, cols: &[ColumnId]) -> HashIn
         .indexes
         .entry(cols.into())
         .or_insert_with(|| {
-            Arc::new(ReadOptimizedLock::new(Index::new(
+            Arc::new(ResettableOnceLock::new(Index::new(
                 cols.to_vec(),
                 TupleIndex::new(cols.len()),
             )))
         })
         .clone();
-    let ix = index.read();
-    if ix.needs_refresh(table_info.table.as_ref()) {
-        mem::drop(ix);
-        let mut ix = index.lock();
-        ix.refresh(table_info.table.as_ref());
-    }
+    index.get_or_update(|index| {
+        index.refresh(table_info.table.as_ref());
+    });
+    debug_assert!(!index
+        .get()
+        .unwrap()
+        .needs_refresh(table_info.table.as_ref()));
     index
 }
 
@@ -689,17 +705,18 @@ fn get_column_index_from_tableinfo(table_info: &TableInfo, col: ColumnId) -> Has
         .column_indexes
         .entry(col)
         .or_insert_with(|| {
-            Arc::new(ReadOptimizedLock::new(Index::new(
+            Arc::new(ResettableOnceLock::new(Index::new(
                 vec![col],
                 ColumnIndex::new(),
             )))
         })
         .clone();
-    let ix = index.read();
-    if ix.needs_refresh(table_info.table.as_ref()) {
-        mem::drop(ix);
-        let mut ix = index.lock();
-        ix.refresh(table_info.table.as_ref());
-    }
+    index.get_or_update(|index| {
+        index.refresh(table_info.table.as_ref());
+    });
+    debug_assert!(!index
+        .get()
+        .unwrap()
+        .needs_refresh(table_info.table.as_ref()));
     index
 }
