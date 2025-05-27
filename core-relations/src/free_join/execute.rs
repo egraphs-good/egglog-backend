@@ -24,7 +24,7 @@ use crate::{
 
 use super::{
     get_column_index_from_tableinfo,
-    plan::{JoinStage, Plan},
+    plan::{JoinHeader, JoinStage, Plan},
     with_pool_set, ActionId, AtomId, Database, HashColumnIndex, HashIndex, TableId, Variable,
 };
 
@@ -177,7 +177,7 @@ impl Database {
                         }
 
                         let search_and_apply_timer = Instant::now();
-                        join_state.run_plan(plan, 0, 0, &mut binding_info, &mut action_buf);
+                        join_state.run_header(plan, &mut binding_info, &mut action_buf);
                         let search_and_apply_time = search_and_apply_timer.elapsed();
 
                         if action_buf.needs_flush {
@@ -214,7 +214,7 @@ impl Database {
                 }
 
                 let search_and_apply_timer = Instant::now();
-                join_state.run_plan(plan, 0, 0, &mut binding_info, &mut action_buf);
+                join_state.run_header(plan, &mut binding_info, &mut action_buf);
                 let search_and_apply_time = search_and_apply_timer.elapsed();
 
                 rule_reports.insert(
@@ -355,6 +355,24 @@ impl<'a> JoinState<'a> {
         self.get_index(plan, atom, binding_info, iter::once(col))
     }
 
+    fn run_header<'buf, BUF: ActionBuffer<'buf>>(
+        &self,
+        plan: &'a Plan,
+        binding_info: &mut BindingInfo,
+        action_buf: &mut BUF,
+    ) where
+        'a: 'buf,
+    {
+        for JoinHeader { atom, subset, .. } in &plan.stages.header {
+            if subset.is_empty() {
+                return;
+            }
+            binding_info.subsets.insert(*atom, subset.clone());
+        }
+
+        self.run_plan(plan, 0, 0, binding_info, action_buf);
+    }
+
     /// The core method for executing a free join plan.
     ///
     /// This method takes the plan, mutable data-structures for variable binding and staging
@@ -373,7 +391,7 @@ impl<'a> JoinState<'a> {
     ) where
         'a: 'buf,
     {
-        if cur >= plan.stages.len() {
+        if cur >= plan.stages.instrs.len() {
             return;
         }
         let chunk_size = action_buf.morsel_size(level);
@@ -439,16 +457,7 @@ impl<'a> JoinState<'a> {
             table.refine(sub, constraints)
         }
 
-        match &plan.stages[cur] {
-            JoinStage::EvalConstraints { atom, subset, .. } => {
-                if subset.is_empty() {
-                    return;
-                }
-                let prev = binding_info.subsets.unwrap_val(*atom);
-                binding_info.subsets.insert(*atom, subset.clone());
-                self.run_plan(plan, cur + 1, level, binding_info, action_buf);
-                binding_info.subsets.insert(*atom, prev);
-            }
+        match &plan.stages.instrs[cur] {
             JoinStage::Intersect { var, scans } => match scans.as_slice() {
                 [] => {}
                 [a] if a.cs.is_empty() => {
