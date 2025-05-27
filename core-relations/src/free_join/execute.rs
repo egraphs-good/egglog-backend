@@ -370,7 +370,7 @@ impl<'a> JoinState<'a> {
             binding_info.subsets.insert(*atom, subset.clone());
         }
 
-        self.run_plan(plan, 0, 0, binding_info, action_buf);
+        self.run_plan(plan, 0, binding_info, action_buf);
     }
 
     /// The core method for executing a free join plan.
@@ -385,7 +385,6 @@ impl<'a> JoinState<'a> {
         &self,
         plan: &'a Plan,
         cur: usize,
-        level: usize,
         binding_info: &mut BindingInfo,
         action_buf: &mut BUF,
     ) where
@@ -394,11 +393,11 @@ impl<'a> JoinState<'a> {
         if cur >= plan.stages.instrs.len() {
             return;
         }
-        let chunk_size = action_buf.morsel_size(level);
+        let chunk_size = action_buf.morsel_size(cur);
         // Helper macro (not its own method to appease the borrow checker).
         macro_rules! drain_updates {
             ($updates:expr) => {
-                if level == 0 || level == 1 {
+                if cur == 0 || cur == 1 {
                     drain_updates_parallel!($updates)
                 } else {
                     for mut update in $updates.drain(..) {
@@ -408,7 +407,7 @@ impl<'a> JoinState<'a> {
                         for (atom, subset) in update.refinements.drain(..) {
                             binding_info.subsets.insert(atom, subset);
                         }
-                        self.run_plan(plan, cur + 1, level + 1, binding_info, action_buf);
+                        self.run_plan(plan, cur + 1, binding_info, action_buf);
                     }
                 }
             };
@@ -435,13 +434,7 @@ impl<'a> JoinState<'a> {
                                 preds: predicted,
                                 index_cache,
                             }
-                            .run_plan(
-                                plan,
-                                cur + 1,
-                                level + 1,
-                                binding_info,
-                                buf,
-                            );
+                            .run_plan(plan, cur + 1, binding_info, buf);
                         }
                     },
                 );
