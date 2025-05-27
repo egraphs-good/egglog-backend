@@ -14,14 +14,14 @@ use crate::{
 
 use super::{ActionId, AtomId, ColumnId, SubAtom, VarInfo, Variable};
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ScanSpec {
     pub to_index: SubAtom,
     // Only yield rows where the given constraints match.
     pub constraints: Vec<Constraint>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SingleScanSpec {
     pub atom: AtomId,
     pub column: ColumnId,
@@ -46,7 +46,17 @@ pub(crate) struct JoinHeader {
     pub subset: Subset,
 }
 
-#[derive(Debug)]
+impl Clone for JoinHeader {
+    fn clone(&self) -> Self {
+        JoinHeader {
+            atom: self.atom,
+            constraints: Pooled::cloned(&self.constraints),
+            subset: self.subset.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub(crate) enum JoinStage {
     Intersect {
         var: Variable,
@@ -133,13 +143,13 @@ impl JoinStage {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Plan {
     pub atoms: DenseIdMap<AtomId, Atom>,
     pub stages: JoinStages,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct JoinStages {
     pub header: Vec<JoinHeader>,
     pub instrs: Vec<JoinStage>,

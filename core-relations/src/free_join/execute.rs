@@ -161,11 +161,19 @@ impl Database {
         let index_cache = IndexCache::default();
         let match_counter = MatchCounter::new(rule_set.actions.n_ids());
 
+        let mut instrs = rule_set
+            .plans
+            .vals()
+            .map(|(plan, _, _)| Vec::from_iter(0..plan.stages.instrs.len()))
+            .collect::<Vec<_>>();
+
         let search_and_apply_timer = Instant::now();
         let rule_reports = DashMap::default();
         if do_parallel() {
             rayon::in_place_scope(|scope| {
-                for (plan, desc, _action) in &rule_set.plans {
+                for ((plan, desc, _action), instr_order) in
+                    rule_set.plans.vals().zip(instrs.iter_mut())
+                {
                     scope.spawn(|scope| {
                         let join_state = JoinState::new(self, &preds, &index_cache);
                         let mut action_buf =
@@ -177,7 +185,12 @@ impl Database {
                         }
 
                         let search_and_apply_timer = Instant::now();
-                        join_state.run_header(plan, &mut binding_info, &mut action_buf);
+                        join_state.run_header(
+                            plan,
+                            instr_order,
+                            &mut binding_info,
+                            &mut action_buf,
+                        );
                         let search_and_apply_time = search_and_apply_timer.elapsed();
 
                         if action_buf.needs_flush {
@@ -206,7 +219,8 @@ impl Database {
                 match_counter: &match_counter,
                 batches: Default::default(),
             };
-            for (plan, desc, _action) in &rule_set.plans {
+            for ((plan, desc, _action), instr_order) in rule_set.plans.vals().zip(instrs.iter_mut())
+            {
                 let mut binding_info = BindingInfo::default();
                 for (id, info) in plan.atoms.iter() {
                     let table = join_state.db.get_table(info.table);
@@ -214,7 +228,7 @@ impl Database {
                 }
 
                 let search_and_apply_timer = Instant::now();
-                join_state.run_header(plan, &mut binding_info, &mut action_buf);
+                join_state.run_header(plan, instr_order, &mut binding_info, &mut action_buf);
                 let search_and_apply_time = search_and_apply_timer.elapsed();
 
                 rule_reports.insert(
@@ -231,7 +245,7 @@ impl Database {
                 Default::default(),
             ));
         }
-        for (_plan, desc, action) in &rule_set.plans {
+        for (_plan, desc, action) in rule_set.plans.vals() {
             let mut reservation = rule_reports.get_mut(desc).unwrap();
             let RuleReport { num_matches, .. } = reservation.value_mut();
             *num_matches = match_counter.read_matches(*action);
@@ -355,9 +369,19 @@ impl<'a> JoinState<'a> {
         self.get_index(plan, atom, binding_info, iter::once(col))
     }
 
+    /// Runs the free join plan, starting with the header.
+    ///
+    /// A bit about the `instr_order` parameter: This defines the order in which the [`JoinStage`]
+    /// instructions will run. We want to support cached [`Plan`]s that may be based on stale
+    /// ordering information. `instr_order` allows us to specify a new ordering of the instructions
+    /// without mutating the plan itself: `run_plan` simply executes
+    /// `plan.stages.instrs[instr_order[i]]` at stage `i`.
+    ///
+    /// This is also a stepping stone towards supporting fully dynamic variable ordering.
     fn run_header<'buf, BUF: ActionBuffer<'buf>>(
         &self,
         plan: &'a Plan,
+        instr_order: &'a mut [usize],
         binding_info: &mut BindingInfo,
         action_buf: &mut BUF,
     ) where
@@ -370,7 +394,17 @@ impl<'a> JoinState<'a> {
             binding_info.subsets.insert(*atom, subset.clone());
         }
 
-        self.run_plan(plan, 0, binding_info, action_buf);
+        fn sort_plan_by_size(
+            order: &mut [usize],
+            instrs: &[JoinStage],
+            binding_info: &mut BindingInfo,
+        ) {
+            order.sort_by_key(|index| {
+                estimate_size(&instrs[*index], binding_info).unwrap_or(usize::MAX)
+            });
+        }
+        sort_plan_by_size(instr_order, &plan.stages.instrs, binding_info);
+        self.run_plan(plan, instr_order, 0, binding_info, action_buf);
     }
 
     /// The core method for executing a free join plan.
@@ -384,13 +418,14 @@ impl<'a> JoinState<'a> {
     fn run_plan<'buf, BUF: ActionBuffer<'buf>>(
         &self,
         plan: &'a Plan,
+        instr_order: &'a [usize],
         cur: usize,
         binding_info: &mut BindingInfo,
         action_buf: &mut BUF,
     ) where
         'a: 'buf,
     {
-        if cur >= plan.stages.instrs.len() {
+        if cur >= instr_order.len() {
             return;
         }
         let chunk_size = action_buf.morsel_size(cur);
@@ -407,7 +442,7 @@ impl<'a> JoinState<'a> {
                         for (atom, subset) in update.refinements.drain(..) {
                             binding_info.subsets.insert(atom, subset);
                         }
-                        self.run_plan(plan, cur + 1, binding_info, action_buf);
+                        self.run_plan(plan, instr_order, cur + 1, binding_info, action_buf);
                     }
                 }
             };
@@ -434,7 +469,13 @@ impl<'a> JoinState<'a> {
                                 preds: predicted,
                                 index_cache,
                             }
-                            .run_plan(plan, cur + 1, binding_info, buf);
+                            .run_plan(
+                                plan,
+                                instr_order,
+                                cur + 1,
+                                binding_info,
+                                buf,
+                            );
                         }
                     },
                 );
@@ -450,7 +491,7 @@ impl<'a> JoinState<'a> {
             table.refine(sub, constraints)
         }
 
-        match &plan.stages.instrs[cur] {
+        match &plan.stages.instrs[instr_order[cur]] {
             JoinStage::Intersect { var, scans } => match scans.as_slice() {
                 [] => {}
                 [a] if a.cs.is_empty() => {
@@ -1029,5 +1070,21 @@ impl MatchCounter {
     }
     fn read_matches(&self, action: ActionId) -> usize {
         self.matches[action].load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+fn estimate_size(join_stage: &JoinStage, binding_info: &BindingInfo) -> Option<usize> {
+    match join_stage {
+        JoinStage::Intersect { scans, .. } => Some(
+            scans
+                .iter()
+                .map(|scan| binding_info.subsets[scan.atom].size())
+                .min()
+                .unwrap_or(0),
+        ),
+        JoinStage::FusedIntersect { cover, .. } => {
+            Some(binding_info.subsets[cover.to_index.atom].size())
+        }
+        JoinStage::RunInstrs { .. } => None,
     }
 }
