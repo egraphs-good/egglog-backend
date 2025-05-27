@@ -28,22 +28,26 @@ pub(crate) struct SingleScanSpec {
     pub cs: Vec<Constraint>,
 }
 
+/// Join headers evaluate constraints on a single atom; they prune the search space before the rest
+/// of the join plan is executed.
+#[derive(Debug)]
+pub(crate) struct JoinHeader {
+    pub atom: AtomId,
+    /// We currently aren't using these at all. The plan is to use this to
+    /// dedup plan stages later (it also helps for debugging).
+    #[allow(unused)]
+    pub constraints: Pooled<Vec<Constraint>>,
+    /// A pre-computed table subset that we can use to filter the table,
+    /// given these constaints.
+    ///
+    /// Why use the constraints at all? Because we want to use them to
+    /// discover common plan nodes from different queries (subsets can be
+    /// large).
+    pub subset: Subset,
+}
+
 #[derive(Debug)]
 pub(crate) enum JoinStage {
-    EvalConstraints {
-        atom: AtomId,
-        /// We currently aren't using these at all. The plan is to use this to
-        /// dedup plan stages later (it also helps for debugging).
-        #[allow(unused)]
-        constraints: Pooled<Vec<Constraint>>,
-        /// A pre-computed table subset that we can use to filter the table,
-        /// given these constaints.
-        ///
-        /// Why use the constraints at all? Because we want to use them to
-        /// discover common plan nodes from different queries (subsets can be
-        /// large).
-        subset: Subset,
-    },
     Intersect {
         var: Variable,
         scans: SmallVec<[SingleScanSpec; 3]>,
@@ -132,7 +136,13 @@ impl JoinStage {
 #[derive(Debug)]
 pub(crate) struct Plan {
     pub atoms: DenseIdMap<AtomId, Atom>,
-    pub stages: Vec<JoinStage>,
+    pub stages: JoinStages,
+}
+
+#[derive(Debug)]
+pub(crate) struct JoinStages {
+    pub header: Vec<JoinHeader>,
+    pub instrs: Vec<JoinStage>,
 }
 
 type VarSet = FixedBitSet;
@@ -163,7 +173,7 @@ pub enum PlanStrategy {
 pub(crate) fn plan_query(query: Query) -> Plan {
     let mut planner = Planner::new(&query.var_info, &query.atoms);
     let mut res = planner.plan(query.plan_strategy);
-    res.stages.push(JoinStage::RunInstrs {
+    res.stages.instrs.push(JoinStage::RunInstrs {
         actions: query.action,
     });
     res
@@ -309,7 +319,8 @@ impl<'a> Planner<'a> {
     }
 
     pub(crate) fn plan(&mut self, strat: PlanStrategy) -> Plan {
-        let mut stages = Vec::new();
+        let mut instrs = Vec::new();
+        let mut header = Vec::new();
         self.used.clear();
         self.constrained.clear();
         let mut remaining_constraints: DenseIdMap<AtomId, (usize, &Pooled<Vec<Constraint>>)> =
@@ -326,7 +337,7 @@ impl<'a> Planner<'a> {
             if atom_info.constraints.fast.is_empty() {
                 continue;
             }
-            stages.push(JoinStage::EvalConstraints {
+            header.push(JoinHeader {
                 atom,
                 constraints: Pooled::cloned(&atom_info.constraints.fast),
                 subset: atom_info.constraints.subset.clone(),
@@ -334,15 +345,15 @@ impl<'a> Planner<'a> {
         }
         match strat {
             PlanStrategy::PureSize | PlanStrategy::MinCover => {
-                self.plan_free_join(strat, &remaining_constraints, &mut stages);
+                self.plan_free_join(strat, &remaining_constraints, &mut instrs);
             }
             PlanStrategy::Gj => {
-                self.plan_gj(&remaining_constraints, &mut stages);
+                self.plan_gj(&remaining_constraints, &mut instrs);
             }
         }
         Plan {
             atoms: self.atoms.clone(),
-            stages,
+            stages: JoinStages { header, instrs },
         }
     }
 
