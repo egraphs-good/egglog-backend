@@ -647,7 +647,7 @@ impl ExecutionState<'_> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) enum Instr {
     /// Look up the value of the given table, inserting a new entry with a
     /// default value if it is not there.
