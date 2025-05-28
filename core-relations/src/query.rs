@@ -213,6 +213,9 @@ impl<'outer, 'a> QueryBuilder<'outer, 'a> {
     /// given this setup. Doing this will not cause any problems but
     /// nevertheless is not recommended.
     ///
+    /// The returned `AtomId` can be used to refer to this atom when adding constraints in
+    /// [`RuleSetBuilder::rule_from_cached_plan`].
+    ///
     /// # Panics
     /// Like most methods that take a [`TableId`], this method will panic if the
     /// given table is not declared in the corresponding database.
@@ -221,7 +224,7 @@ impl<'outer, 'a> QueryBuilder<'outer, 'a> {
         table_id: TableId,
         vars: &[QueryEntry],
         cs: impl IntoIterator<Item = &'b Constraint>,
-    ) -> Result<(), QueryError> {
+    ) -> Result<AtomId, QueryError> {
         let info = &self.rsb.db.tables[table_id];
         let arity = info.spec.arity();
         let check_constraint = |c: &Constraint| {
@@ -309,8 +312,7 @@ impl<'outer, 'a> QueryBuilder<'outer, 'a> {
                 .occurrences
                 .push(subatom);
         }
-        self.query.atoms.push(atom);
-        Ok(())
+        Ok(self.query.atoms.push(atom))
     }
 }
 

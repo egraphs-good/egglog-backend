@@ -304,11 +304,16 @@ impl RuleBuilder<'_> {
             last_run_at: Timestamp::new(0),
             query: self.query,
             syntax: self.proof_builder.syntax,
+            cached_plan: None,
             desc: self.proof_builder.rule_description,
         };
         debug!("created rule {res:?} / {}:\n{:?}", info.desc, info.syntax);
         self.egraph.rules.insert(res, info);
         res
+    }
+
+    pub(crate) fn build_cached_plan(&self) -> Option<core_relations::CachedPlan> {
+        todo!()
     }
 
     pub(crate) fn set_focus(&mut self, focus: usize) {
@@ -583,7 +588,7 @@ impl RuleBuilder<'_> {
             schema_math.write_table_row(
                 &mut dst_entries,
                 RowVals {
-                    timestamp: inner.next_ts.to_value().into(),
+                    timestamp: inner.next_ts,
                     proof: cur_proof_val,
                     subsume: Some(SUBSUMED.into()),
                     ret_val: Some(inner.convert(&ret.into())),
@@ -636,7 +641,7 @@ impl RuleBuilder<'_> {
                     let mut write_vals = SmallVec::<[WriteVal; 4]>::new();
                     for i in schema_math.num_keys()..schema_math.table_columns() {
                         if i == schema_math.ts_col() {
-                            write_vals.push(inner.next_ts.to_value().into());
+                            write_vals.push(inner.next_ts.into());
                         } else if i == schema_math.ret_val_col() {
                             write_vals.push(wv);
                         } else if schema_math.tracing && i == schema_math.proof_id_col() {
@@ -810,17 +815,14 @@ impl RuleBuilder<'_> {
                 let r = inner.convert(&r);
                 add_proof(inner, rb)?;
                 let proof = inner.mapping[reason_var];
-                rb.insert(
-                    inner.uf_table,
-                    &[l, r, inner.next_ts.to_value().into(), proof],
-                )
-                .context("union")
+                rb.insert(inner.uf_table, &[l, r, inner.next_ts, proof])
+                    .context("union")
             })
         } else {
             Box::new(move |inner, rb| {
                 let l = inner.convert(&l);
                 let r = inner.convert(&r);
-                rb.insert(inner.uf_table, &[l, r, inner.next_ts.to_value().into()])
+                rb.insert(inner.uf_table, &[l, r, inner.next_ts])
                     .context("union")
             })
         };
@@ -891,7 +893,7 @@ impl RuleBuilder<'_> {
             schema_math.write_table_row(
                 &mut dst_vars,
                 RowVals {
-                    timestamp: inner.next_ts.to_value().into(),
+                    timestamp: inner.next_ts,
                     proof: Some(inner.mapping[term_var]),
                     subsume: subsume_var.map(|v| inner.mapping[v]),
                     ret_val: None, // already filled in,
@@ -904,7 +906,7 @@ impl RuleBuilder<'_> {
                 &[
                     inner.mapping[before_term],
                     inner.mapping[term_var],
-                    inner.next_ts.to_value().into(),
+                    inner.next_ts,
                     inner.mapping[reason_var],
                 ],
             )
@@ -956,7 +958,7 @@ impl RuleBuilder<'_> {
                     schema_math.write_table_row(
                         &mut dst_vars,
                         RowVals {
-                            timestamp: inner.next_ts.to_value().into(),
+                            timestamp: inner.next_ts,
                             proof: Some(proof_var.into()),
                             subsume: Some(inner.convert(&subsume_entry)),
                             ret_val: Some(inner.convert(&res.into())),
@@ -971,7 +973,7 @@ impl RuleBuilder<'_> {
                 schema_math.write_table_row(
                     &mut dst_vars,
                     RowVals {
-                        timestamp: inner.next_ts.to_value().into(),
+                        timestamp: inner.next_ts,
                         proof: None, // tracing is off
                         subsume: schema_math.subsume.then(|| inner.convert(&subsume_entry)),
                         ret_val: None, // already filled in
@@ -1020,7 +1022,7 @@ impl Query {
         qb.set_plan_strategy(self.plan_strategy);
         let mut inner = Bindings {
             uf_table: self.uf_table,
-            next_ts,
+            next_ts: next_ts.to_value().into(),
             mapping: Default::default(),
             grounded: Default::default(),
         };
@@ -1039,6 +1041,26 @@ impl Query {
         Ok(())
     }
 
+    pub(crate) fn build_base_plan(
+        &self,
+        rsb: &mut RuleSetBuilder,
+        next_ts: Timestamp,
+        desc: &str,
+    ) -> Result<()> {
+        // TODO: what do we do here....
+        // We could rewrite the timestamp variable...
+        // Or we could just read from the timestamp counter at the top of the action?
+        let todo_handle_timestamps = 1;
+
+        // If a rule has an empty LHS, we still want to run it once. This will cause the right
+        // hand side of the rule to run once, globally across all runs.
+        let (mut qb, mut inner) = self.query_state(rsb, next_ts);
+        for (table, entries, _schema_info) in &self.atoms {
+            add_atom(&mut qb, *table, entries, &[], &mut inner)?;
+        }
+        return self.run_rules_and_build(qb, inner, desc);
+    }
+
     /// Translate the egglog query into a (set of) queries against the database.
     ///
     /// The timestamp values are used to guide seminaive evaluation. The query
@@ -1052,22 +1074,6 @@ impl Query {
         next_ts: Timestamp,
         desc: &str,
     ) -> Result<()> {
-        fn add_atom(
-            qb: &mut QueryBuilder,
-            table: TableId,
-            entries: &[QueryEntry],
-            constraints: &[Constraint],
-            inner: &mut Bindings,
-        ) -> Result<()> {
-            for entry in entries {
-                if let QueryEntry::Var { id, .. } = entry {
-                    inner.grounded.insert(*id);
-                }
-            }
-            let vars = inner.convert_all(entries);
-            qb.add_atom(table, &vars, constraints)?;
-            Ok(())
-        }
         // For N atoms, we create N queries for seminaive evaluation.
         if !self.seminaive || (self.atoms.is_empty() && mid_ts == Timestamp::new(0)) {
             // If a rule has an empty LHS, we still want to run it once. This will cause the right
@@ -1142,7 +1148,7 @@ impl Query {
 /// rules into variables for core-relations rules.
 pub(crate) struct Bindings {
     uf_table: TableId,
-    pub(crate) next_ts: Timestamp,
+    pub(crate) next_ts: DstVar,
     pub(crate) mapping: DenseIdMap<Variable, DstVar>,
     grounded: HashSet<Variable>,
 }
@@ -1157,4 +1163,21 @@ impl Bindings {
     pub(crate) fn convert_all(&self, entries: &[QueryEntry]) -> SmallVec<[DstVar; 4]> {
         entries.iter().map(|e| self.convert(e)).collect()
     }
+}
+
+fn add_atom(
+    qb: &mut QueryBuilder,
+    table: TableId,
+    entries: &[QueryEntry],
+    constraints: &[Constraint],
+    inner: &mut Bindings,
+) -> Result<()> {
+    for entry in entries {
+        if let QueryEntry::Var { id, .. } = entry {
+            inner.grounded.insert(*id);
+        }
+    }
+    let vars = inner.convert_all(entries);
+    qb.add_atom(table, &vars, constraints)?;
+    Ok(())
 }
