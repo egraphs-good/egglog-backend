@@ -38,7 +38,7 @@ pub(crate) mod execute;
 pub(crate) mod plan;
 
 define_id!(
-    pub(crate) AtomId,
+    pub AtomId,
     u32,
     "A component of a query consisting of a function and a list of variables or constants"
 );

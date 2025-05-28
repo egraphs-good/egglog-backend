@@ -153,6 +153,10 @@ impl EGraph {
         Timestamp::from_usize(self.db.read_counter(self.timestamp_counter))
     }
 
+    fn ts_counter(&self) -> CounterId {
+        self.timestamp_counter
+    }
+
     fn inc_ts(&mut self) {
         self.db.inc_counter(self.timestamp_counter);
     }
@@ -981,6 +985,7 @@ struct RuleInfo {
     last_run_at: Timestamp,
     query: rule::Query,
     syntax: RuleRepresentation,
+    cached_plan: Option<Arc<core_relations::CachedPlan>>,
     desc: Arc<str>,
 }
 

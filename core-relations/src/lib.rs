@@ -31,7 +31,7 @@ pub use hash_index::TupleIndex;
 pub use offsets::{OffsetRange, RowId, Subset, SubsetRef};
 pub use pool::{Pool, PoolSet, Pooled};
 pub use primitives::{Primitive, PrimitiveId, PrimitivePrinter, Primitives};
-pub use query::{QueryBuilder, QueryError, RuleBuilder, RuleSet, RuleSetBuilder};
+pub use query::{CachedPlan, QueryBuilder, QueryError, RuleBuilder, RuleSet, RuleSetBuilder};
 pub use row_buffer::TaggedRowBuffer;
 pub use table::{MergeFn, SortedWritesTable};
 pub use table_spec::{
