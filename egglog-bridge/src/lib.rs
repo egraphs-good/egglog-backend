@@ -985,8 +985,16 @@ struct RuleInfo {
     last_run_at: Timestamp,
     query: rule::Query,
     syntax: RuleRepresentation,
-    cached_plan: Option<Arc<core_relations::CachedPlan>>,
+    cached_plan: Option<CachedPlanInfo>,
     desc: Arc<str>,
+}
+
+#[derive(Clone)]
+struct CachedPlanInfo {
+    plan: Arc<core_relations::CachedPlan>,
+    /// A mapping from index into a [`rule::Query`]'s atoms to the atoms in the underlying cached
+    /// plan.
+    atom_mapping: Vec<core_relations::AtomId>,
 }
 
 #[derive(Clone)]
@@ -1392,7 +1400,7 @@ fn run_rules_impl(
     for rule in rules {
         let info = &mut rule_info[*rule];
         info.query
-            .add_rules(&mut rsb, info.last_run_at, next_ts, &info.desc)?;
+            .add_rules(&mut rsb, info.last_run_at, &info.desc)?;
         info.last_run_at = next_ts;
     }
     let ruleset = rsb.build();

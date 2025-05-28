@@ -24,14 +24,16 @@ pub use action::{ExecutionState, MergeVal, QueryEntry, WriteVal};
 pub use common::Value;
 pub use containers::{Container, ContainerId, Containers};
 pub use free_join::{
-    make_external_func, plan::PlanStrategy, CounterId, Database, ExternalFunction,
+    make_external_func, plan::PlanStrategy, AtomId, CounterId, Database, ExternalFunction,
     ExternalFunctionId, RuleReport, RuleSetReport, TableId, Variable,
 };
 pub use hash_index::TupleIndex;
 pub use offsets::{OffsetRange, RowId, Subset, SubsetRef};
 pub use pool::{Pool, PoolSet, Pooled};
 pub use primitives::{Primitive, PrimitiveId, PrimitivePrinter, Primitives};
-pub use query::{CachedPlan, QueryBuilder, QueryError, RuleBuilder, RuleSet, RuleSetBuilder};
+pub use query::{
+    CachedPlan, QueryBuilder, QueryError, RuleBuilder, RuleId, RuleSet, RuleSetBuilder,
+};
 pub use row_buffer::TaggedRowBuffer;
 pub use table::{MergeFn, SortedWritesTable};
 pub use table_spec::{

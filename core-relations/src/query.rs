@@ -16,7 +16,7 @@ use crate::{
     pool::{with_pool_set, Pooled},
     primitives::PrimitiveId,
     table_spec::{ColumnId, Constraint},
-    ExternalFunctionId, PoolSet,
+    CounterId, ExternalFunctionId, PoolSet,
 };
 
 define_id!(pub RuleId, u32, "An identifier for a rule in a rule set");
@@ -96,7 +96,7 @@ impl<'outer> RuleSetBuilder<'outer> {
         }
     }
 
-    pub fn rule_from_cached_plan(
+    pub fn add_rule_from_cached_plan(
         &mut self,
         cached: &CachedPlan,
         extra_constraints: &[(AtomId, Constraint)],
@@ -384,6 +384,15 @@ impl RuleBuilder<'_, '_> {
             .rule_set
             .plans
             .push((plan, desc.into(), action_id))
+    }
+
+    /// Return a variable containing the result of reading the specified counter.
+    pub fn read_counter(&mut self, counter: CounterId) -> Variable {
+        let dst = self.qb.new_var();
+        self.qb
+            .instrs
+            .push(Instr::BroadcastCounter { counter, dst });
+        dst
     }
 
     /// Return a variable containing the result of looking up the specified
