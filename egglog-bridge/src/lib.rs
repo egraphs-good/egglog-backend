@@ -1392,6 +1392,7 @@ fn run_rules_impl(
     rules: &[RuleId],
     next_ts: Timestamp,
 ) -> Result<RuleSetReport> {
+    let todo_resolve = 1;
     for rule in rules {
         let info = &mut rule_info[*rule];
         if info.cached_plan.is_none() {
@@ -1404,8 +1405,8 @@ fn run_rules_impl(
         let cached_plan = info.cached_plan.as_ref().unwrap();
         info.query
             .add_rules_from_cached(&mut rsb, info.last_run_at, cached_plan)?;
-        // info.query
-        //     .add_rules(&mut rsb, info.last_run_at, &info.desc)?;
+        //info.query
+        //    .add_rules(&mut rsb, info.last_run_at, &info.desc)?;
         info.last_run_at = next_ts;
     }
     let ruleset = rsb.build();

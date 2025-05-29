@@ -394,15 +394,8 @@ impl<'a> JoinState<'a> {
             binding_info.subsets.insert(*atom, subset.clone());
         }
 
-        fn sort_plan_by_size(
-            order: &mut [usize],
-            instrs: &[JoinStage],
-            binding_info: &mut BindingInfo,
-        ) {
-            order.sort_by_key(|index| estimate_size(&instrs[*index], binding_info));
-        }
         sort_plan_by_size(instr_order, &plan.stages.instrs, binding_info);
-        self.run_plan(plan, instr_order, 0, binding_info, action_buf);
+        self.run_plan(plan, instr_order.into(), 0, binding_info, action_buf);
     }
 
     /// The core method for executing a free join plan.
@@ -416,7 +409,7 @@ impl<'a> JoinState<'a> {
     fn run_plan<'buf, BUF: ActionBuffer<'buf>>(
         &self,
         plan: &'a Plan,
-        instr_order: &'a [usize],
+        mut instr_order: Box<[usize]>,
         cur: usize,
         binding_info: &mut BindingInfo,
         action_buf: &mut BUF,
@@ -430,6 +423,11 @@ impl<'a> JoinState<'a> {
             return;
         }
         let chunk_size = action_buf.morsel_size(cur);
+        let cur_size = estimate_size(&plan.stages.instrs[instr_order[cur]], binding_info);
+        if cur_size > 32 && cur < instr_order.len() - 1 {
+            // If we have a reasonable number of tuples to process, adjust the variable order.
+            sort_plan_by_size(&mut instr_order[cur..], &plan.stages.instrs, binding_info);
+        }
         // Helper macro (not its own method to appease the borrow checker).
         macro_rules! drain_updates {
             ($updates:expr) => {
@@ -443,7 +441,7 @@ impl<'a> JoinState<'a> {
                         for (atom, subset) in update.refinements.drain(..) {
                             binding_info.subsets.insert(atom, subset);
                         }
-                        self.run_plan(plan, instr_order, cur + 1, binding_info, action_buf);
+                        self.run_plan(plan, instr_order.clone(), cur + 1, binding_info, action_buf);
                     }
                 }
             };
@@ -454,6 +452,7 @@ impl<'a> JoinState<'a> {
                 let predicted = self.preds;
                 let index_cache = self.index_cache;
                 let db = self.db;
+                let next_order = instr_order.clone();
                 action_buf.recur(
                     binding_info,
                     move || ExecutionState::new(predicted, db.read_only_view(), Default::default()),
@@ -472,7 +471,7 @@ impl<'a> JoinState<'a> {
                             }
                             .run_plan(
                                 plan,
-                                instr_order,
+                                next_order.clone(),
                                 cur + 1,
                                 binding_info,
                                 buf,
@@ -1078,4 +1077,7 @@ fn estimate_size(join_stage: &JoinStage, binding_info: &BindingInfo) -> usize {
             .unwrap_or(0),
         JoinStage::FusedIntersect { cover, .. } => binding_info.subsets[cover.to_index.atom].size(),
     }
+}
+fn sort_plan_by_size(order: &mut [usize], instrs: &[JoinStage], binding_info: &mut BindingInfo) {
+    order.sort_by_key(|index| estimate_size(&instrs[*index], binding_info));
 }
