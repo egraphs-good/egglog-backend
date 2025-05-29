@@ -1,6 +1,6 @@
 //! APIs for building a query of a database.
 
-use std::iter::once;
+use std::{iter::once, sync::Arc};
 
 use numeric_id::{define_id, DenseIdMap, IdVec, NumericId};
 use thiserror::Error;
@@ -9,7 +9,7 @@ use crate::{
     action::{Instr, QueryEntry, WriteVal},
     common::HashMap,
     free_join::{
-        plan::{JoinHeader, JoinStage, JoinStages, Plan, PlanStrategy},
+        plan::{JoinHeader, JoinStages, Plan, PlanStrategy},
         ActionId, AtomId, Database, ProcessedConstraints, SubAtom, TableId, TableInfo, VarInfo,
         Variable,
     },
@@ -25,7 +25,7 @@ define_id!(pub RuleId, u32, "An identifier for a rule in a rule set");
 pub struct CachedPlan {
     plan: Plan,
     desc: String,
-    actions: Pooled<Vec<Instr>>,
+    actions: Arc<Pooled<Vec<Instr>>>,
 }
 
 /// A set of rules to run against a [`Database`].
@@ -41,13 +41,17 @@ pub struct RuleSet {
     /// later on, most of the core logic would still work but the accounting logic could get more
     /// complex.
     pub(crate) plans: IdVec<RuleId, (Plan, String /* description */, ActionId)>,
-    pub(crate) actions: DenseIdMap<ActionId, Pooled<Vec<Instr>>>,
+    pub(crate) actions: DenseIdMap<ActionId, Arc<Pooled<Vec<Instr>>>>,
 }
 
 impl RuleSet {
     pub fn build_cached_plan(&self, rule_id: RuleId) -> CachedPlan {
         let (plan, desc, action_id) = self.plans.get(rule_id).expect("rule must exist");
-        let actions = Pooled::cloned(self.actions.get(*action_id).expect("action must exist"));
+        let actions = self
+            .actions
+            .get(*action_id)
+            .expect("action must exist")
+            .clone();
         CachedPlan {
             plan: plan.clone(),
             desc: desc.clone(),
@@ -101,23 +105,16 @@ impl<'outer> RuleSetBuilder<'outer> {
         cached: &CachedPlan,
         extra_constraints: &[(AtomId, Constraint)],
     ) -> RuleId {
+        // First, patch in the new action id.
+        let action_id = self.rule_set.actions.push(cached.actions.clone());
         let mut plan = Plan {
             atoms: cached.plan.atoms.clone(),
             stages: JoinStages {
                 header: Default::default(),
                 instrs: cached.plan.stages.instrs.clone(),
+                actions: action_id,
             },
         };
-
-        // First, patch in the new action id.
-        let action_id = self.rule_set.actions.push(Pooled::cloned(&cached.actions));
-        let JoinStage::RunInstrs { actions } = plan.stages.instrs.last_mut().unwrap() else {
-            panic!(
-                "cached plan must end with a RunInstrs stage, got: {:?}",
-                plan.stages.instrs
-            );
-        };
-        *actions = action_id;
 
         // Next, patch in the "extra constraints" that we want to add to the plan.
         for (atom_id, constraint) in extra_constraints {
@@ -374,7 +371,7 @@ impl RuleBuilder<'_, '_> {
     }
     pub fn build_with_description(mut self, desc: impl Into<String>) -> RuleId {
         // Generate an id for our actions and slot them in.
-        let action_id = self.qb.rsb.rule_set.actions.push(self.qb.instrs);
+        let action_id = self.qb.rsb.rule_set.actions.push(Arc::new(self.qb.instrs));
         self.qb.query.action = action_id;
         // Plan the query
         let plan = self.qb.rsb.db.plan_query(self.qb.query);

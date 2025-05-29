@@ -1046,10 +1046,10 @@ impl Query {
 
     pub(crate) fn build_cached_plan(
         &self,
-        egraph: &mut EGraph,
+        db: &mut core_relations::Database,
         desc: &str,
     ) -> Result<CachedPlanInfo> {
-        let mut rsb = RuleSetBuilder::new(&mut egraph.db);
+        let mut rsb = RuleSetBuilder::new(db);
         let (mut qb, mut inner) = self.query_state(&mut rsb);
         let mut atom_mapping = Vec::with_capacity(self.atoms.len());
         for (table, entries, _schema_info) in &self.atoms {

@@ -153,10 +153,6 @@ impl EGraph {
         Timestamp::from_usize(self.db.read_counter(self.timestamp_counter))
     }
 
-    fn ts_counter(&self) -> CounterId {
-        self.timestamp_counter
-    }
-
     fn inc_ts(&mut self) {
         self.db.inc_counter(self.timestamp_counter);
     }
@@ -1396,11 +1392,20 @@ fn run_rules_impl(
     rules: &[RuleId],
     next_ts: Timestamp,
 ) -> Result<RuleSetReport> {
+    for rule in rules {
+        let info = &mut rule_info[*rule];
+        if info.cached_plan.is_none() {
+            info.cached_plan = Some(info.query.build_cached_plan(db, &info.desc)?);
+        }
+    }
     let mut rsb = db.new_rule_set();
     for rule in rules {
         let info = &mut rule_info[*rule];
+        let cached_plan = info.cached_plan.as_ref().unwrap();
         info.query
-            .add_rules(&mut rsb, info.last_run_at, &info.desc)?;
+            .add_rules_from_cached(&mut rsb, info.last_run_at, cached_plan)?;
+        // info.query
+        //     .add_rules(&mut rsb, info.last_run_at, &info.desc)?;
         info.last_run_at = next_ts;
     }
     let ruleset = rsb.build();

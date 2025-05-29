@@ -399,9 +399,7 @@ impl<'a> JoinState<'a> {
             instrs: &[JoinStage],
             binding_info: &mut BindingInfo,
         ) {
-            order.sort_by_key(|index| {
-                estimate_size(&instrs[*index], binding_info).unwrap_or(usize::MAX)
-            });
+            order.sort_by_key(|index| estimate_size(&instrs[*index], binding_info));
         }
         sort_plan_by_size(instr_order, &plan.stages.instrs, binding_info);
         self.run_plan(plan, instr_order, 0, binding_info, action_buf);
@@ -426,6 +424,9 @@ impl<'a> JoinState<'a> {
         'a: 'buf,
     {
         if cur >= instr_order.len() {
+            action_buf.push_bindings(plan.stages.actions, &binding_info.bindings, || {
+                ExecutionState::new(self.preds, self.db.read_only_view(), Default::default())
+            });
             return;
         }
         let chunk_size = action_buf.morsel_size(cur);
@@ -806,11 +807,6 @@ impl<'a> JoinState<'a> {
                     binding_info.subsets.insert(atom, prober.subset);
                 }
             }
-            JoinStage::RunInstrs { actions } => {
-                action_buf.push_bindings(*actions, &binding_info.bindings, || {
-                    ExecutionState::new(self.preds, self.db.read_only_view(), Default::default())
-                });
-            }
         }
     }
 }
@@ -1073,18 +1069,13 @@ impl MatchCounter {
     }
 }
 
-fn estimate_size(join_stage: &JoinStage, binding_info: &BindingInfo) -> Option<usize> {
+fn estimate_size(join_stage: &JoinStage, binding_info: &BindingInfo) -> usize {
     match join_stage {
-        JoinStage::Intersect { scans, .. } => Some(
-            scans
-                .iter()
-                .map(|scan| binding_info.subsets[scan.atom].size())
-                .min()
-                .unwrap_or(0),
-        ),
-        JoinStage::FusedIntersect { cover, .. } => {
-            Some(binding_info.subsets[cover.to_index.atom].size())
-        }
-        JoinStage::RunInstrs { .. } => None,
+        JoinStage::Intersect { scans, .. } => scans
+            .iter()
+            .map(|scan| binding_info.subsets[scan.atom].size())
+            .min()
+            .unwrap_or(0),
+        JoinStage::FusedIntersect { cover, .. } => binding_info.subsets[cover.to_index.atom].size(),
     }
 }

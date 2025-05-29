@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, iter, mem};
+use std::{collections::BTreeMap, iter, mem, sync::Arc};
 
 use fixedbitset::FixedBitSet;
 use numeric_id::{DenseIdMap, NumericId};
@@ -66,9 +66,6 @@ pub(crate) enum JoinStage {
         cover: ScanSpec,
         bind: SmallVec<[(ColumnId, Variable); 2]>,
         to_intersect: Vec<(ScanSpec, SmallVec<[ColumnId; 2]>)>,
-    },
-    RunInstrs {
-        actions: ActionId,
     },
 }
 
@@ -152,7 +149,8 @@ pub(crate) struct Plan {
 #[derive(Debug, Clone)]
 pub(crate) struct JoinStages {
     pub header: Vec<JoinHeader>,
-    pub instrs: Vec<JoinStage>,
+    pub instrs: Arc<Vec<JoinStage>>,
+    pub actions: ActionId,
 }
 
 type VarSet = FixedBitSet;
@@ -181,12 +179,7 @@ pub enum PlanStrategy {
 }
 
 pub(crate) fn plan_query(query: Query) -> Plan {
-    let mut planner = Planner::new(&query.var_info, &query.atoms);
-    let mut res = planner.plan(query.plan_strategy);
-    res.stages.instrs.push(JoinStage::RunInstrs {
-        actions: query.action,
-    });
-    res
+    Planner::new(&query.var_info, &query.atoms).plan(query.plan_strategy, query.action)
 }
 
 struct Planner<'a> {
@@ -328,7 +321,7 @@ impl<'a> Planner<'a> {
         }
     }
 
-    pub(crate) fn plan(&mut self, strat: PlanStrategy) -> Plan {
+    pub(crate) fn plan(&mut self, strat: PlanStrategy, actions: ActionId) -> Plan {
         let mut instrs = Vec::new();
         let mut header = Vec::new();
         self.used.clear();
@@ -363,7 +356,11 @@ impl<'a> Planner<'a> {
         }
         Plan {
             atoms: self.atoms.clone(),
-            stages: JoinStages { header, instrs },
+            stages: JoinStages {
+                header,
+                instrs: Arc::new(instrs),
+                actions,
+            },
         }
     }
 
