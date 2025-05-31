@@ -142,7 +142,7 @@ impl JoinStage {
 
 #[derive(Debug, Clone)]
 pub(crate) struct Plan {
-    pub atoms: DenseIdMap<AtomId, Atom>,
+    pub atoms: Arc<DenseIdMap<AtomId, Atom>>,
     pub stages: JoinStages,
 }
 
@@ -355,7 +355,7 @@ impl<'a> Planner<'a> {
             }
         }
         Plan {
-            atoms: self.atoms.clone(),
+            atoms: self.atoms.clone().into(),
             stages: JoinStages {
                 header,
                 instrs: Arc::new(instrs),
