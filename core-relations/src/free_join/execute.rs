@@ -159,6 +159,7 @@ impl Database {
         }
         let preds = with_pool_set(|ps| ps.get::<PredictedVals>());
         let index_cache = IndexCache::default();
+        let todo_remove_apply_time = 1;
         let match_counter = MatchCounter::new(rule_set.actions.n_ids());
 
         let mut instrs = rule_set
@@ -187,6 +188,7 @@ impl Database {
                         let search_and_apply_timer = Instant::now();
                         join_state.run_header(
                             plan,
+                            "",
                             instr_order,
                             &mut binding_info,
                             &mut action_buf,
@@ -221,6 +223,7 @@ impl Database {
             };
             for ((plan, desc, _action), instr_order) in rule_set.plans.vals().zip(instrs.iter_mut())
             {
+                match_counter.scan_count.clear();
                 let mut binding_info = BindingInfo::default();
                 for (id, info) in plan.atoms.iter() {
                     let table = join_state.db.get_table(info.table);
@@ -228,7 +231,7 @@ impl Database {
                 }
 
                 let search_and_apply_timer = Instant::now();
-                join_state.run_header(plan, instr_order, &mut binding_info, &mut action_buf);
+                join_state.run_header(plan, desc, instr_order, &mut binding_info, &mut action_buf);
                 let search_and_apply_time = search_and_apply_timer.elapsed();
 
                 rule_reports.insert(
@@ -238,6 +241,12 @@ impl Database {
                         num_matches: 0,
                     },
                 );
+                if desc.contains(TARGET) {
+                    eprintln!(
+                        "Rule {desc} finished with scan_counts: {:#?}",
+                        match_counter.scan_count
+                    );
+                }
             }
             action_buf.flush(&mut ExecutionState::new(
                 &preds,
@@ -249,6 +258,12 @@ impl Database {
             let mut reservation = rule_reports.get_mut(desc).unwrap();
             let RuleReport { num_matches, .. } = reservation.value_mut();
             *num_matches = match_counter.read_matches(*action);
+            if desc.contains(TARGET) {
+                eprintln!(
+                    "Rule {} matched {num_matches} times",
+                    desc.replace('\n', " ")
+                );
+            }
         }
         let search_and_apply_time = search_and_apply_timer.elapsed();
 
@@ -381,21 +396,38 @@ impl<'a> JoinState<'a> {
     fn run_header<'buf, BUF: ActionBuffer<'buf>>(
         &self,
         plan: &'a Plan,
+        desc: &'a str,
         instr_order: &'a mut [usize],
         binding_info: &mut BindingInfo,
         action_buf: &mut BUF,
     ) where
         'a: 'buf,
     {
+        let todo_remove_desc = 1;
         for JoinHeader { atom, subset, .. } in &plan.stages.header {
             if subset.is_empty() {
                 return;
             }
-            binding_info.subsets.insert(*atom, subset.clone());
+            let mut cur = binding_info.subsets.unwrap_val(*atom);
+            cur.intersect(subset.as_ref(), &with_pool_set(|ps| ps.get_pool()));
+            binding_info.subsets.insert(*atom, cur);
         }
 
         sort_plan_by_size(instr_order, &plan.stages.instrs, binding_info);
-        self.run_plan(plan, instr_order.into(), 0, binding_info, action_buf);
+        if desc.contains(TARGET) {
+            eprintln!(
+                "Problematic plan: {plan:#?}\nWith order: {instr_order:?}\nAtoms: {:#?}",
+                binding_info.subsets,
+            );
+        }
+        self.run_plan(
+            plan,
+            instr_order.into(),
+            0,
+            binding_info,
+            action_buf,
+            desc.contains(TARGET),
+        );
     }
 
     /// The core method for executing a free join plan.
@@ -413,9 +445,11 @@ impl<'a> JoinState<'a> {
         cur: usize,
         binding_info: &mut BindingInfo,
         action_buf: &mut BUF,
+        print_extra: bool,
     ) where
         'a: 'buf,
     {
+        let remove_print_extra = 1;
         if cur >= instr_order.len() {
             action_buf.push_bindings(plan.stages.actions, &binding_info.bindings, || {
                 ExecutionState::new(self.preds, self.db.read_only_view(), Default::default())
@@ -441,7 +475,14 @@ impl<'a> JoinState<'a> {
                         for (atom, subset) in update.refinements.drain(..) {
                             binding_info.subsets.insert(atom, subset);
                         }
-                        self.run_plan(plan, instr_order.clone(), cur + 1, binding_info, action_buf);
+                        self.run_plan(
+                            plan,
+                            instr_order.clone(),
+                            cur + 1,
+                            binding_info,
+                            action_buf,
+                            print_extra,
+                        );
                     }
                 }
             };
@@ -475,6 +516,7 @@ impl<'a> JoinState<'a> {
                                 cur + 1,
                                 binding_info,
                                 buf,
+                                print_extra,
                             );
                         }
                     },
@@ -491,6 +533,8 @@ impl<'a> JoinState<'a> {
             table.refine(sub, constraints)
         }
 
+        let mut count = 0;
+
         match &plan.stages.instrs[instr_order[cur]] {
             JoinStage::Intersect { var, scans } => match scans.as_slice() {
                 [] => {}
@@ -504,6 +548,7 @@ impl<'a> JoinState<'a> {
                     let mut updates = with_pool_set(|ps| {
                         let mut updates: Pooled<Vec<Pooled<FrameUpdate>>> = ps.get();
                         prober.for_each(|val, x| {
+                            count += 1;
                             let mut update: Pooled<FrameUpdate> = ps.get();
                             update.push_binding(*var, val[0]);
                             let sub = refine_subset(x.to_owned(&ps.get_pool()), &[], &table);
@@ -530,6 +575,7 @@ impl<'a> JoinState<'a> {
                     let mut updates = with_pool_set(|ps| {
                         let mut updates: Pooled<Vec<Pooled<FrameUpdate>>> = ps.get();
                         prober.for_each(|val, x| {
+                            count += 1;
                             let mut update: Pooled<FrameUpdate> = ps.get();
                             update.push_binding(*var, val[0]);
                             let sub = refine_subset(x.to_owned(&ps.get_pool()), &a.cs, &table);
@@ -552,6 +598,14 @@ impl<'a> JoinState<'a> {
                     let a_prober = self.get_column_index(plan, binding_info, a.atom, a.column);
                     let b_prober = self.get_column_index(plan, binding_info, b.atom, b.column);
 
+                    if print_extra && cur == 0 {
+                        eprintln!(
+                            "cur=0, Intersecting {var:?} and probers have size {} and {}",
+                            a_prober.len(),
+                            b_prober.len()
+                        );
+                    }
+
                     let ((smaller, smaller_scan), (larger, larger_scan)) =
                         if a_prober.len() < b_prober.len() {
                             ((&a_prober, a), (&b_prober, b))
@@ -565,8 +619,10 @@ impl<'a> JoinState<'a> {
                     let small_table = self.db.tables[plan.atoms[smaller_atom].table]
                         .table
                         .as_ref();
+                    let prev_count = count;
                     with_pool_set(|ps| {
                         smaller.for_each(|val, small_sub| {
+                            count += 1;
                             if let Some(mut large_sub) = larger.get_subset(val) {
                                 large_sub = refine_subset(large_sub, &larger_scan.cs, &large_table);
                                 if large_sub.is_empty() {
@@ -592,6 +648,9 @@ impl<'a> JoinState<'a> {
                         });
                     });
                     drain_updates!(updates);
+                    if print_extra && cur == 0 {
+                        eprintln!("finished cur=0, count went from {prev_count} to {count}",);
+                    }
 
                     binding_info.subsets.insert(a.atom, a_prober.subset);
                     binding_info.subsets.insert(b.atom, b_prober.subset);
@@ -620,6 +679,7 @@ impl<'a> JoinState<'a> {
                     if smallest_size != 0 {
                         // Smallest leads the scan
                         probers[smallest].for_each(|key, sub| {
+                            count += 1;
                             with_pool_set(|ps| {
                                 let mut update: Pooled<FrameUpdate> = ps.get();
                                 update.push_binding(*var, key[0]);
@@ -686,6 +746,7 @@ impl<'a> JoinState<'a> {
                         &mut buffer,
                     );
                     for (row, key) in buffer.non_stale() {
+                        count += 1;
                         let mut update: Pooled<FrameUpdate> = with_pool_set(PoolSet::get);
                         update.refine_atom(
                             cover_atom,
@@ -753,6 +814,7 @@ impl<'a> JoinState<'a> {
                     );
                     let pool: Pool<FrameUpdate> = with_pool_set(PoolSet::get_pool);
                     'mid: for (row, key) in buffer.non_stale() {
+                        count += 1;
                         let mut update: Pooled<FrameUpdate> = pool.get();
                         update.refine_atom(
                             cover_atom,
@@ -807,6 +869,7 @@ impl<'a> JoinState<'a> {
                 }
             }
         }
+        action_buf.scan_count(cur, count);
     }
 }
 
@@ -886,6 +949,10 @@ trait ActionBuffer<'state>: Send {
     fn morsel_size(&mut self, _level: usize) -> usize {
         1024
     }
+
+    fn scan_count(&mut self, instr: usize, size: usize) {
+        let todo_remove_method = 1;
+    }
 }
 
 /// The action buffer we use if we are executing in a single-threaded
@@ -935,6 +1002,10 @@ impl<'a, 'outer: 'a> ActionBuffer<'a> for InPlaceActionBuffer<'outer> {
         work: impl for<'b> FnOnce(&mut Local, &mut Self) + Send + 'a,
     ) {
         work(local, self);
+    }
+
+    fn scan_count(&mut self, instr: usize, size: usize) {
+        self.match_counter.update_scan_count(instr, size);
     }
 }
 
@@ -1041,9 +1112,11 @@ fn flush_action_states(
 ) {
     for (action, ActionState { bindings, len, .. }) in actions.iter_mut() {
         if *len > 0 {
+            let start = web_time::Instant::now();
             exec_state.run_instrs(&rule_set.actions[action], bindings);
             bindings.clear();
             match_counter.inc_matches(action, *len);
+            match_counter.record_apply_time(action, start);
             *len = 0;
         }
     }
@@ -1051,13 +1124,21 @@ fn flush_action_states(
 
 struct MatchCounter {
     matches: IdVec<ActionId, AtomicUsize>,
+    apply_time: IdVec<ActionId, AtomicUsize>,
+    scan_count: DashMap<usize, usize>,
 }
 
 impl MatchCounter {
     fn new(n_ids: usize) -> Self {
         let mut matches = IdVec::with_capacity(n_ids);
+        let mut apply_time = IdVec::with_capacity(n_ids);
         matches.resize_with(n_ids, || AtomicUsize::new(0));
-        Self { matches }
+        apply_time.resize_with(n_ids, || AtomicUsize::new(0));
+        Self {
+            matches,
+            apply_time,
+            scan_count: Default::default(),
+        }
     }
 
     fn inc_matches(&self, action: ActionId, by: usize) {
@@ -1066,18 +1147,57 @@ impl MatchCounter {
     fn read_matches(&self, action: ActionId) -> usize {
         self.matches[action].load(std::sync::atomic::Ordering::Acquire)
     }
+    fn record_apply_time(&self, action: ActionId, start: web_time::Instant) {
+        let elapsed = start.elapsed().as_nanos() as usize;
+        self.apply_time[action].fetch_add(elapsed, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn read_apply_time(&self, action: ActionId) -> web_time::Duration {
+        let nanos = self.apply_time[action].load(std::sync::atomic::Ordering::Acquire);
+        web_time::Duration::from_nanos(nanos as u64)
+    }
+
+    fn update_scan_count(&self, instr: usize, size: usize) {
+        self.scan_count
+            .entry(instr)
+            .and_modify(|count| *count += size)
+            .or_insert(size);
+    }
 }
 
 fn estimate_size(join_stage: &JoinStage, binding_info: &BindingInfo) -> usize {
+    join_stage_order_key(join_stage, binding_info).0
+}
+
+fn join_stage_order_key(join_stage: &JoinStage, binding_info: &BindingInfo) -> (usize, i32) {
+    // Sort increasing by size of scan, decreasing by number of intersections.
     match join_stage {
-        JoinStage::Intersect { scans, .. } => scans
-            .iter()
-            .map(|scan| binding_info.subsets[scan.atom].size())
-            .min()
-            .unwrap_or(0),
-        JoinStage::FusedIntersect { cover, .. } => binding_info.subsets[cover.to_index.atom].size(),
+        JoinStage::Intersect { scans, .. } => (
+            scans
+                .iter()
+                .map(|scan| binding_info.subsets[scan.atom].size())
+                .min()
+                .unwrap_or(0),
+            -(scans.len() as i32),
+        ),
+        JoinStage::FusedIntersect {
+            cover,
+            to_intersect,
+            ..
+        } => (
+            binding_info.subsets[cover.to_index.atom].size(),
+            -(to_intersect.len() as i32),
+        ),
     }
 }
+
 fn sort_plan_by_size(order: &mut [usize], instrs: &[JoinStage], binding_info: &mut BindingInfo) {
-    order.sort_by_key(|index| estimate_size(&instrs[*index], binding_info));
+    order.sort_by_key(|index| join_stage_order_key(&instrs[*index], binding_info));
 }
+
+type TodoGetRidOfThis = ();
+const TARGET: &str = "(rule ((Prod a b c)
+       (P p1 s b)
+       (P p2 (+ s p1) c))
+      ((P (+ p1 p2) s a))
+         )-atom(1)[Timestamp(877)]";

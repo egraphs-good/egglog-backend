@@ -104,6 +104,7 @@ impl<'outer> RuleSetBuilder<'outer> {
         &mut self,
         cached: &CachedPlan,
         extra_constraints: &[(AtomId, Constraint)],
+        desc: &str,
     ) -> RuleId {
         // First, patch in the new action id.
         let action_id = self.rule_set.actions.push(cached.actions.clone());
@@ -156,9 +157,7 @@ impl<'outer> RuleSetBuilder<'outer> {
             });
         }
 
-        self.rule_set
-            .plans
-            .push((plan, cached.desc.clone(), action_id))
+        self.rule_set.plans.push((plan, desc.into(), action_id))
     }
 
     /// Build the ruleset.
@@ -723,6 +722,11 @@ pub(crate) struct Atom {
     pub(crate) table: TableId,
     pub(crate) var_to_column: HashMap<Variable, ColumnId>,
     pub(crate) column_to_var: DenseIdMap<ColumnId, Variable>,
+    /// These constraints are an initial take at processing "fast" constraints as well as a
+    /// potential list of "slow" constraints.
+    ///
+    /// Fast constraints get re-computed when queries are executed. In particular, this makes it
+    /// possible to cache plans and add new fast constraints to them without re-planning.
     pub(crate) constraints: ProcessedConstraints,
 }
 

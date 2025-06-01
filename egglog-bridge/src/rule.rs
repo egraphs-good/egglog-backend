@@ -1066,11 +1066,13 @@ impl Query {
         rsb: &mut RuleSetBuilder,
         mid_ts: Timestamp,
         cached_plan: &CachedPlanInfo,
+        desc: &str,
     ) -> Result<()> {
+        let todo_remove_desc = 1;
         // For N atoms, we create N queries for seminaive evaluation. We can reuse the cached plan
         // directly.
         if !self.seminaive || (self.atoms.is_empty() && mid_ts == Timestamp::new(0)) {
-            rsb.add_rule_from_cached_plan(&cached_plan.plan, &[]);
+            rsb.add_rule_from_cached_plan(&cached_plan.plan, &[], desc);
             return Ok(());
         }
         if let Some(focus_atom) = self.sole_focus {
@@ -1086,6 +1088,7 @@ impl Query {
                         val: mid_ts.to_value(),
                     },
                 )],
+                desc,
             );
             return Ok(());
         }
@@ -1118,7 +1121,11 @@ impl Query {
                     Ordering::Greater => {}
                 };
             }
-            rsb.add_rule_from_cached_plan(&cached_plan.plan, &constraints);
+            rsb.add_rule_from_cached_plan(
+                &cached_plan.plan,
+                &constraints,
+                &format!("{desc}-atom({focus_atom})[{mid_ts:?}]"),
+            );
             constraints.clear();
         }
         Ok(())
