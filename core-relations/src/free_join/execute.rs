@@ -161,19 +161,11 @@ impl Database {
         let index_cache = IndexCache::default();
         let match_counter = MatchCounter::new(rule_set.actions.n_ids());
 
-        let mut instrs = rule_set
-            .plans
-            .vals()
-            .map(|(plan, _, _)| Vec::from_iter(0..plan.stages.instrs.len()))
-            .collect::<Vec<_>>();
-
         let search_and_apply_timer = Instant::now();
         let rule_reports = DashMap::default();
         if do_parallel() {
             rayon::in_place_scope(|scope| {
-                for ((plan, desc, _action), instr_order) in
-                    rule_set.plans.vals().zip(instrs.iter_mut())
-                {
+                for (plan, desc, _action) in rule_set.plans.vals() {
                     scope.spawn(|scope| {
                         let join_state = JoinState::new(self, &preds, &index_cache);
                         let mut action_buf =
@@ -185,12 +177,7 @@ impl Database {
                         }
 
                         let search_and_apply_timer = Instant::now();
-                        join_state.run_header(
-                            plan,
-                            instr_order,
-                            &mut binding_info,
-                            &mut action_buf,
-                        );
+                        join_state.run_header(plan, &mut binding_info, &mut action_buf);
                         let search_and_apply_time = search_and_apply_timer.elapsed();
 
                         if action_buf.needs_flush {
@@ -219,8 +206,7 @@ impl Database {
                 match_counter: &match_counter,
                 batches: Default::default(),
             };
-            for ((plan, desc, _action), instr_order) in rule_set.plans.vals().zip(instrs.iter_mut())
-            {
+            for (plan, desc, _action) in rule_set.plans.vals() {
                 let mut binding_info = BindingInfo::default();
                 for (id, info) in plan.atoms.iter() {
                     let table = join_state.db.get_table(info.table);
@@ -228,7 +214,7 @@ impl Database {
                 }
 
                 let search_and_apply_timer = Instant::now();
-                join_state.run_header(plan, instr_order, &mut binding_info, &mut action_buf);
+                join_state.run_header(plan, &mut binding_info, &mut action_buf);
                 let search_and_apply_time = search_and_apply_timer.elapsed();
 
                 rule_reports.insert(
@@ -381,7 +367,6 @@ impl<'a> JoinState<'a> {
     fn run_header<'buf, BUF: ActionBuffer<'buf>>(
         &self,
         plan: &'a Plan,
-        instr_order: &'a mut [usize],
         binding_info: &mut BindingInfo,
         action_buf: &mut BUF,
     ) where
@@ -395,9 +380,12 @@ impl<'a> JoinState<'a> {
             cur.intersect(subset.as_ref(), &with_pool_set(|ps| ps.get_pool()));
             binding_info.subsets.insert(*atom, cur);
         }
-
-        sort_plan_by_size(instr_order, &plan.stages.instrs, binding_info);
-        self.run_plan(plan, instr_order.into(), 0, binding_info, action_buf);
+        let mut order: Pooled<Vec<u32>> = with_pool_set(|ps| ps.get());
+        order.extend(
+            0..u32::try_from(plan.stages.instrs.len()).expect("plans should be smaller than this"),
+        );
+        sort_plan_by_size(order.as_mut_slice(), &plan.stages.instrs, binding_info);
+        self.run_plan(plan, order, 0, binding_info, action_buf);
     }
 
     /// The core method for executing a free join plan.
@@ -411,7 +399,7 @@ impl<'a> JoinState<'a> {
     fn run_plan<'buf, BUF: ActionBuffer<'buf>>(
         &self,
         plan: &'a Plan,
-        mut instr_order: Box<[usize]>,
+        mut instr_order: Pooled<Vec<u32>>,
         cur: usize,
         binding_info: &mut BindingInfo,
         action_buf: &mut BUF,
@@ -425,7 +413,7 @@ impl<'a> JoinState<'a> {
             return;
         }
         let chunk_size = action_buf.morsel_size(cur);
-        let cur_size = estimate_size(&plan.stages.instrs[instr_order[cur]], binding_info);
+        let cur_size = estimate_size(&plan.stages.instrs[instr_order[cur] as usize], binding_info);
         if cur_size > 32 && cur < instr_order.len() - 1 {
             // If we have a reasonable number of tuples to process, adjust the variable order.
             sort_plan_by_size(&mut instr_order[cur..], &plan.stages.instrs, binding_info);
@@ -443,7 +431,13 @@ impl<'a> JoinState<'a> {
                         for (atom, subset) in update.refinements.drain(..) {
                             binding_info.subsets.insert(atom, subset);
                         }
-                        self.run_plan(plan, instr_order.clone(), cur + 1, binding_info, action_buf);
+                        self.run_plan(
+                            plan,
+                            Pooled::cloned(&instr_order),
+                            cur + 1,
+                            binding_info,
+                            action_buf,
+                        );
                     }
                 }
             };
@@ -454,7 +448,7 @@ impl<'a> JoinState<'a> {
                 let predicted = self.preds;
                 let index_cache = self.index_cache;
                 let db = self.db;
-                let next_order = instr_order.clone();
+                let next_order = Pooled::cloned(&instr_order);
                 action_buf.recur(
                     binding_info,
                     move || ExecutionState::new(predicted, db.read_only_view(), Default::default()),
@@ -473,7 +467,7 @@ impl<'a> JoinState<'a> {
                             }
                             .run_plan(
                                 plan,
-                                next_order.clone(),
+                                Pooled::cloned(&next_order),
                                 cur + 1,
                                 binding_info,
                                 buf,
@@ -493,7 +487,7 @@ impl<'a> JoinState<'a> {
             table.refine(sub, constraints)
         }
 
-        match &plan.stages.instrs[instr_order[cur]] {
+        match &plan.stages.instrs[instr_order[cur] as usize] {
             JoinStage::Intersect { var, scans } => match scans.as_slice() {
                 [] => {}
                 [a] if a.cs.is_empty() => {
@@ -1096,6 +1090,6 @@ fn join_stage_order_key(join_stage: &JoinStage, binding_info: &BindingInfo) -> (
     }
 }
 
-fn sort_plan_by_size(order: &mut [usize], instrs: &[JoinStage], binding_info: &mut BindingInfo) {
-    order.sort_by_key(|index| join_stage_order_key(&instrs[*index], binding_info));
+fn sort_plan_by_size(order: &mut [u32], instrs: &[JoinStage], binding_info: &mut BindingInfo) {
+    order.sort_by_key(|index| join_stage_order_key(&instrs[*index as usize], binding_info));
 }
