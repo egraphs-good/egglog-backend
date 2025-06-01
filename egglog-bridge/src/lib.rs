@@ -1392,31 +1392,18 @@ fn run_rules_impl(
     rules: &[RuleId],
     next_ts: Timestamp,
 ) -> Result<RuleSetReport> {
-    let todo_resolve = 1;
-    const CACHE: bool = true;
-    if CACHE {
-        for rule in rules {
-            let info = &mut rule_info[*rule];
-            if info.cached_plan.is_none() {
-                info.cached_plan = Some(info.query.build_cached_plan(db, &info.desc)?);
-            }
+    for rule in rules {
+        let info = &mut rule_info[*rule];
+        if info.cached_plan.is_none() {
+            info.cached_plan = Some(info.query.build_cached_plan(db, &info.desc)?);
         }
     }
     let mut rsb = db.new_rule_set();
     for rule in rules {
         let info = &mut rule_info[*rule];
-        if CACHE {
-            let cached_plan = info.cached_plan.as_ref().unwrap();
-            info.query.add_rules_from_cached(
-                &mut rsb,
-                info.last_run_at,
-                cached_plan,
-                &info.desc,
-            )?;
-        } else {
-            info.query
-                .add_rules(&mut rsb, info.last_run_at, &info.desc)?;
-        }
+        let cached_plan = info.cached_plan.as_ref().unwrap();
+        info.query
+            .add_rules_from_cached(&mut rsb, info.last_run_at, cached_plan)?;
         info.last_run_at = next_ts;
     }
     let ruleset = rsb.build();

@@ -104,7 +104,6 @@ impl<'outer> RuleSetBuilder<'outer> {
         &mut self,
         cached: &CachedPlan,
         extra_constraints: &[(AtomId, Constraint)],
-        desc: &str,
     ) -> RuleId {
         // First, patch in the new action id.
         let action_id = self.rule_set.actions.push(cached.actions.clone());
@@ -157,7 +156,9 @@ impl<'outer> RuleSetBuilder<'outer> {
             });
         }
 
-        self.rule_set.plans.push((plan, desc.into(), action_id))
+        self.rule_set
+            .plans
+            .push((plan, cached.desc.clone(), action_id))
     }
 
     /// Build the ruleset.

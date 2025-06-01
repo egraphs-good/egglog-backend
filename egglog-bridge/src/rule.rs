@@ -1061,18 +1061,22 @@ impl Query {
         Ok(CachedPlanInfo { plan, atom_mapping })
     }
 
+    /// Add rules to the [`RuleSetBuilder`] for the query specified by the [`CachedPlanInfo`].
+    ///
+    /// A [`CachedPlanInfo`] is a compiled RHS and partial LHS for an egglog rules. In order to
+    /// implement seminaive evaluation, we run several variants of this cached plan with different
+    /// constraints on the timestamps for different atoms. This rule handles building these
+    /// variants of the base plan and adding them to `rsb`.
     pub(crate) fn add_rules_from_cached(
         &self,
         rsb: &mut RuleSetBuilder,
         mid_ts: Timestamp,
         cached_plan: &CachedPlanInfo,
-        desc: &str,
     ) -> Result<()> {
-        let todo_remove_desc = 1;
         // For N atoms, we create N queries for seminaive evaluation. We can reuse the cached plan
         // directly.
         if !self.seminaive || (self.atoms.is_empty() && mid_ts == Timestamp::new(0)) {
-            rsb.add_rule_from_cached_plan(&cached_plan.plan, &[], desc);
+            rsb.add_rule_from_cached_plan(&cached_plan.plan, &[]);
             return Ok(());
         }
         if let Some(focus_atom) = self.sole_focus {
@@ -1088,7 +1092,6 @@ impl Query {
                         val: mid_ts.to_value(),
                     },
                 )],
-                desc,
             );
             return Ok(());
         }
@@ -1121,87 +1124,8 @@ impl Query {
                     Ordering::Greater => {}
                 };
             }
-            rsb.add_rule_from_cached_plan(
-                &cached_plan.plan,
-                &constraints,
-                &format!("{desc}-atom({focus_atom})[{mid_ts:?}]"),
-            );
+            rsb.add_rule_from_cached_plan(&cached_plan.plan, &constraints);
             constraints.clear();
-        }
-        Ok(())
-    }
-
-    /// Translate the egglog query into a (set of) queries against the database.
-    ///
-    /// The timestamp values are used to guide seminaive evaluation. The query
-    /// is taken to have run against the database values between start_ts and
-    /// mid_ts (half-open), but the database (now) contains values up to
-    /// next_ts.
-    pub(crate) fn add_rules(
-        &self,
-        rsb: &mut RuleSetBuilder,
-        mid_ts: Timestamp,
-        desc: &str,
-    ) -> Result<()> {
-        // For N atoms, we create N queries for seminaive evaluation.
-        if !self.seminaive || (self.atoms.is_empty() && mid_ts == Timestamp::new(0)) {
-            // If a rule has an empty LHS, we still want to run it once. This will cause the right
-            // hand side of the rule to run once, globally across all runs.
-            let (mut qb, mut inner) = self.query_state(rsb);
-            for (table, entries, _schema_info) in &self.atoms {
-                add_atom(&mut qb, *table, entries, &[], &mut inner)?;
-            }
-            self.run_rules_and_build(qb, inner, desc)?;
-            return Ok(());
-        }
-        if let Some(focus_atom) = self.sole_focus {
-            let (mut qb, mut inner) = self.query_state(rsb);
-            for (i, (table, entries, schema_info)) in self.atoms.iter().enumerate() {
-                let ts_col = ColumnId::from_usize(schema_info.ts_col());
-                let constraint = if i == focus_atom {
-                    Some(Constraint::GeConst {
-                        col: ts_col,
-                        val: mid_ts.to_value(),
-                    })
-                } else {
-                    None
-                };
-                if let Some(c) = constraint {
-                    add_atom(&mut qb, *table, entries, &[c], &mut inner)
-                } else {
-                    add_atom(&mut qb, *table, entries, &[], &mut inner)
-                }?;
-            }
-            self.run_rules_and_build(qb, inner, &format!("{desc}-atom({focus_atom})[{mid_ts:?}]"))?;
-            return Ok(());
-        }
-        'outer: for focus_atom in 0..self.atoms.len() {
-            let (mut qb, mut inner) = self.query_state(rsb);
-            for (i, (table, entries, schema_info)) in self.atoms.iter().enumerate() {
-                let ts_col = ColumnId::from_usize(schema_info.ts_col());
-                let constraint = match i.cmp(&focus_atom) {
-                    Ordering::Less => {
-                        if mid_ts == Timestamp::new(0) {
-                            continue 'outer;
-                        }
-                        Some(Constraint::LtConst {
-                            col: ts_col,
-                            val: mid_ts.to_value(),
-                        })
-                    }
-                    Ordering::Equal => Some(Constraint::GeConst {
-                        col: ts_col,
-                        val: mid_ts.to_value(),
-                    }),
-                    Ordering::Greater => None,
-                };
-                if let Some(c) = constraint {
-                    add_atom(&mut qb, *table, entries, &[c], &mut inner)
-                } else {
-                    add_atom(&mut qb, *table, entries, &[], &mut inner)
-                }?;
-            }
-            self.run_rules_and_build(qb, inner, &format!("{desc}-atom({focus_atom})[{mid_ts:?}]"))?;
         }
         Ok(())
     }
