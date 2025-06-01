@@ -15,6 +15,7 @@ use crate::{
     free_join::{get_index_from_tableinfo, RuleReport, RuleSetReport},
     hash_index::{ColumnIndex, IndexBase, TupleIndex},
     offsets::{Offsets, SortedOffsetVector, Subset},
+    parallel_heuristics::parallelize_db_level_op,
     pool::{Clear, Pooled},
     query::RuleSet,
     row_buffer::TaggedRowBuffer,
@@ -142,18 +143,6 @@ impl Prober {
 
 impl Database {
     pub fn run_rule_set(&mut self, rule_set: &RuleSet) -> RuleSetReport {
-        fn do_parallel() -> bool {
-            #[cfg(debug_assertions)]
-            {
-                use rand::Rng;
-                rand::thread_rng().gen_bool(0.5)
-            }
-
-            #[cfg(not(debug_assertions))]
-            {
-                rayon::current_num_threads() > 1
-            }
-        }
         if rule_set.plans.is_empty() {
             return RuleSetReport::default();
         }
@@ -163,7 +152,7 @@ impl Database {
 
         let search_and_apply_timer = Instant::now();
         let rule_reports = DashMap::default();
-        if do_parallel() {
+        if parallelize_db_level_op(self.total_size_estimate) {
             rayon::in_place_scope(|scope| {
                 for (plan, desc, _action) in rule_set.plans.vals() {
                     scope.spawn(|scope| {
@@ -412,7 +401,7 @@ impl<'a> JoinState<'a> {
             });
             return;
         }
-        let chunk_size = action_buf.morsel_size(cur);
+        let chunk_size = action_buf.morsel_size(cur, instr_order.len());
         let cur_size = estimate_size(&plan.stages.instrs[instr_order[cur] as usize], binding_info);
         if cur_size > 32 && cur < instr_order.len() - 1 {
             // If we have a reasonable number of tuples to process, adjust the variable order.
@@ -879,7 +868,7 @@ trait ActionBuffer<'state>: Send {
     ///
     /// As of right now this is just a hard-coded value. We may change it in the
     /// future to fan out more at higher levels though.
-    fn morsel_size(&mut self, _level: usize) -> usize {
+    fn morsel_size(&mut self, _level: usize, _total: usize) -> usize {
         1024
     }
 }
@@ -1023,9 +1012,12 @@ impl<'scope> ActionBuffer<'scope> for ScopedActionBuffer<'_, 'scope> {
             }
         });
     }
-    fn morsel_size(&mut self, _level: usize) -> usize {
+    fn morsel_size(&mut self, _level: usize, _total: usize) -> usize {
         // Lower morsel size to increase parallelism.
-        256
+        match _level {
+            0 if _total > 2 => 32,
+            _ => 256,
+        }
     }
 }
 

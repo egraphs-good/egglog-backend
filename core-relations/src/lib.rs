@@ -8,6 +8,7 @@ pub(crate) mod dependency_graph;
 pub(crate) mod free_join;
 pub(crate) mod hash_index;
 pub(crate) mod offsets;
+pub(crate) mod parallel_heuristics;
 pub(crate) mod pool;
 pub(crate) mod primitives;
 pub(crate) mod query;

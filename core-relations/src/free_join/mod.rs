@@ -22,6 +22,7 @@ use crate::{
     dependency_graph::DependencyGraph,
     hash_index::{ColumnIndex, Index, IndexBase},
     offsets::Subset,
+    parallel_heuristics::parallelize_db_level_op,
     pool::{with_pool_set, Pool, Pooled},
     primitives::Primitives,
     query::{Query, RuleSetBuilder},
@@ -298,6 +299,11 @@ pub struct Database {
     // Tracks the relative dependencies between tables during merge operations.
     deps: DependencyGraph,
     primitives: Primitives,
+    /// A rough estimate of the total size of the database.
+    ///
+    /// This is primarily used to determine whether or not to attempt to do some operations in
+    /// parallel.
+    total_size_estimate: usize,
 }
 
 impl Database {
@@ -363,21 +369,9 @@ impl Database {
         to_rebuild: &[TableId],
         next_ts: Value,
     ) -> bool {
-        fn do_parallel() -> bool {
-            #[cfg(test)]
-            {
-                use rand::Rng;
-                rand::thread_rng().gen_bool(0.5)
-            }
-            #[cfg(not(test))]
-            {
-                rayon::current_num_threads() > 1
-            }
-        }
-
         let func = self.tables.take(func_id).unwrap();
         let predicted = PredictedVals::default();
-        if do_parallel() {
+        if parallelize_db_level_op(self.total_size_estimate) {
             let mut tables = Vec::with_capacity(to_rebuild.len());
             for id in to_rebuild {
                 tables.push((*id, self.tables.take(*id).unwrap()));
@@ -472,7 +466,7 @@ impl Database {
     /// Useful for out-of-band insertions into the database.
     pub fn merge_all(&mut self) -> bool {
         let mut ever_changed = false;
-        let do_parallel = rayon::current_num_threads() > 1;
+        let do_parallel = parallelize_db_level_op(self.total_size_estimate);
         loop {
             let mut changed = false;
             let predicted = with_pool_set(|ps| ps.get::<PredictedVals>());
@@ -532,6 +526,7 @@ impl Database {
             }
         }
         // Reset all indexes to force an update on the next access.
+        let mut size_estimate = 0;
         for (_, info) in self.tables.iter_mut() {
             iter_dashmap_bulk(&mut info.column_indexes, |_, ci| {
                 Arc::get_mut(ci).unwrap().reset();
@@ -539,7 +534,9 @@ impl Database {
             iter_dashmap_bulk(&mut info.indexes, |_, ti| {
                 Arc::get_mut(ti).unwrap().reset();
             });
+            size_estimate += info.table.len();
         }
+        self.total_size_estimate = size_estimate;
         ever_changed
     }
 
@@ -552,11 +549,13 @@ impl Database {
     pub fn merge_table(&mut self, table: TableId) {
         let mut info = self.tables.unwrap_val(table);
         let predicted = with_pool_set(|ps| ps.get::<PredictedVals>());
+        self.total_size_estimate = self.total_size_estimate.wrapping_sub(info.table.len());
         let _table_changed = info.table.merge(&mut ExecutionState::new(
             &predicted,
             self.read_only_view(),
             Default::default(),
         ));
+        self.total_size_estimate = self.total_size_estimate.wrapping_add(info.table.len());
         self.tables.insert(table, info);
     }
 
