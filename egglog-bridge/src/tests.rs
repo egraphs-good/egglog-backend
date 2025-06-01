@@ -667,10 +667,18 @@ fn container_test() {
             ],
             || "add_0_last".to_string(),
         );
-        let new_vec_1 =
-            rb.call_external_func(vec_push, &[vec.into(), add_last_0.into()], ColumnTy::Id, "");
-        let new_vec_2 =
-            rb.call_external_func(vec_push, &[vec.into(), add_0_last.into()], ColumnTy::Id, "");
+        let new_vec_1 = rb.call_external_func(
+            vec_push,
+            &[vec.into(), add_last_0.into()],
+            ColumnTy::Id,
+            || "".to_string(),
+        );
+        let new_vec_2 = rb.call_external_func(
+            vec_push,
+            &[vec.into(), add_0_last.into()],
+            ColumnTy::Id,
+            || "".to_string(),
+        );
         rb.lookup(vec_table, &[new_vec_1.into()], String::new);
         rb.lookup(vec_table, &[new_vec_2.into()], String::new);
         rb.build()
@@ -697,7 +705,7 @@ fn container_test() {
             int_add,
             &[lhs_raw.into(), rhs_raw.into()],
             ColumnTy::Primitive(int_prim),
-            "",
+            || "".to_string(),
         );
         let boxed = rb.lookup(num_table, &[evaled.into()], String::new);
         rb.union(add_id.into(), boxed.into());
@@ -799,7 +807,7 @@ fn rhs_only_rule_only_runs_once() {
     }));
     let inc_counter_rule = {
         let mut rb = egraph.new_rule("", true);
-        rb.call_external_func(inc_counter_func, &[], ColumnTy::Id, "");
+        rb.call_external_func(inc_counter_func, &[], ColumnTy::Id, || "".to_string());
         rb.build()
     };
 
@@ -1388,13 +1396,13 @@ fn primitive_failure_panics() {
             assert_odd,
             slice::from_ref(&value_1),
             ColumnTy::Primitive(unit_prim),
-            "",
+            || "".to_string(),
         );
         rb.call_external_func(
             assert_odd,
             slice::from_ref(&value_2),
             ColumnTy::Primitive(unit_prim),
-            "",
+            || "".to_string(),
         );
         rb.build()
     };

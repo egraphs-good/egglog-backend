@@ -27,6 +27,7 @@ use hashbrown::HashMap;
 use indexmap::{map::Entry, IndexMap, IndexSet};
 use log::info;
 use numeric_id::{define_id, DenseIdMap, DenseIdMapWithReuse, NumericId};
+use once_cell::sync::Lazy;
 use proof_spec::{ProofReason, ProofReconstructionState, ReasonSpecId};
 use smallvec::SmallVec;
 use web_time::{Duration, Instant};
@@ -74,7 +75,7 @@ pub struct EGraph {
     /// This is a cache of all the different panic messages that we may use while executing rules
     /// against the EGraph. Oftentimes, these messages are generated dynamically: keeping this map
     /// around allows us to cache external function ids with repeat panic messages and they can
-    /// also serve as a debugging tool in the case that the number of panic messages grows without
+    /// also serve as a debugging tool in the c_lazyase that the number of panic messages grows without
     /// bound.
     panic_funcs: HashMap<String, ExternalFunctionId>,
     proof_specs: DenseIdMap<ReasonSpecId, Arc<ProofReason>>,
@@ -1446,6 +1447,35 @@ impl ExternalFunction for GetFirstMatch {
     }
 }
 
+/// This is a variant on [`Panic`] that avoids eager construction of the panic message.
+///
+/// The main thing this is used for is to avoid constructing the panic message ahead of time during
+/// a call to [`RuleBuilder::call_external_func`]; these panic messages are often quite rare and
+/// may never need to be constructed at all. Furthermore, a closure to produce the panic message in
+/// most cases need only close over a few cheap-to-clone values.
+///
+/// The downside of this, and why we do not use it everywhere, is that there's no natural "key"
+/// that we can use to cache duplicate panic messages. We would need a more complex API to support
+/// both and fully replace our use of `Panic`.
+struct LazyPanic<F>(Arc<Lazy<String, F>>, SideChannel<String>);
+
+impl<F: FnOnce() -> String + Send> ExternalFunction for LazyPanic<F> {
+    fn invoke(&self, _: &mut core_relations::ExecutionState, args: &[Value]) -> Option<Value> {
+        assert!(args.is_empty());
+        let mut guard = self.1.lock().unwrap();
+        if guard.is_none() {
+            *guard = Some(Lazy::force(&self.0).clone());
+        }
+        None
+    }
+}
+
+impl<F> Clone for LazyPanic<F> {
+    fn clone(&self) -> Self {
+        LazyPanic(self.0.clone(), self.1.clone())
+    }
+}
+
 /// An external function used to store a message when a panic occurs.
 //
 // TODO: once we have parallelism wired in, we'll want to replace this with a
@@ -1456,10 +1486,22 @@ struct Panic(String, SideChannel<String>);
 impl EGraph {
     /// Create a new `ExternalFunction` that panics with the given message.
     pub fn new_panic(&mut self, message: String) -> ExternalFunctionId {
-        *self.panic_funcs.entry(message.clone()).or_insert_with(|| {
-            let panic = Panic(message, self.panic_message.clone());
-            self.db.add_external_function(panic)
-        })
+        *self
+            .panic_funcs
+            .entry(message.to_string())
+            .or_insert_with(|| {
+                let panic = Panic(message, self.panic_message.clone());
+                self.db.add_external_function(panic)
+            })
+    }
+
+    pub fn new_panic_lazy(
+        &mut self,
+        message: impl FnOnce() -> String + Send + 'static,
+    ) -> ExternalFunctionId {
+        let lazy = Lazy::new(message);
+        let panic = LazyPanic(Arc::new(lazy), self.panic_message.clone());
+        self.db.add_external_function(panic)
     }
 }
 
