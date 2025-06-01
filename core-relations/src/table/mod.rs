@@ -991,7 +991,6 @@ impl SortedWritesTable {
             return;
         }
 
-        // The '* 4' biases the heuristic towards parallel evaluation.
         if parallelize_table_op(self.data.data.len()) {
             self.parallel_rehash();
         } else {
