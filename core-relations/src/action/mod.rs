@@ -643,7 +643,7 @@ impl ExecutionState<'_> {
             }
             Instr::AssertEq(l, r) => assert_impl(bindings, mask, l, r, |l, r| l == r),
             Instr::AssertNe(l, r) => assert_impl(bindings, mask, l, r, |l, r| l != r),
-            Instr::BroadcastCounter { counter, dst } => {
+            Instr::ReadCounter { counter, dst } => {
                 let mut vals = pool_set.get::<Vec<Value>>();
                 let ctr_val = Value::from_usize(self.read_counter(*counter));
                 vals.resize(bindings.matches, ctr_val);
@@ -750,7 +750,8 @@ pub(crate) enum Instr {
         divider: usize,
     },
 
-    BroadcastCounter {
+    /// Read the value of a counter and write it to the given variable.
+    ReadCounter {
         /// The counter to broadcast.
         counter: CounterId,
         /// The variable to write the value to.

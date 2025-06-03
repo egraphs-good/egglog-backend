@@ -332,7 +332,7 @@ impl<K: NumericId, V> IdVec<K, V> {
         self.data.is_empty()
     }
 
-    pub fn vals(&self) -> impl Iterator<Item = &V> {
+    pub fn values(&self) -> impl Iterator<Item = &V> {
         self.data.iter()
     }
 

@@ -386,9 +386,7 @@ impl RuleBuilder<'_, '_> {
     /// Return a variable containing the result of reading the specified counter.
     pub fn read_counter(&mut self, counter: CounterId) -> Variable {
         let dst = self.qb.new_var();
-        self.qb
-            .instrs
-            .push(Instr::BroadcastCounter { counter, dst });
+        self.qb.instrs.push(Instr::ReadCounter { counter, dst });
         dst
     }
 

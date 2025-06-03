@@ -7,7 +7,6 @@ use std::{
 };
 
 use numeric_id::{define_id, DenseIdMap, NumericId};
-use ordered_float::OrderedFloat;
 
 use crate::common::{HashMap, InternTable, Value};
 
@@ -21,7 +20,11 @@ define_id!(pub PrimitiveId, u32, "an identifier for primitive types");
 ///
 /// Most callers can simply implement this trait on their desired type, with no overrides needed.
 /// For types that are particularly small, users can override the `try_box` and `try_unbox`
-/// methods.
+/// methods and set `MAY_UNBOX` to `true` to allow the primitive to be stored directly in a
+/// `Value`.
+///
+/// Regardless, all primitive types should be registered in a [`Primitives`] instance using the
+/// [`Primitives::register_type`] method before they can be used in the database.
 pub trait Primitive: Clone + Hash + Eq + Any + Debug + Send + Sync {
     const MAY_UNBOX: bool = false;
     fn intern(&self, table: &InternTable<Self, Value>) -> Value {
@@ -40,12 +43,7 @@ pub trait Primitive: Clone + Hash + Eq + Any + Debug + Send + Sync {
 
 impl Primitive for String {}
 impl Primitive for &'static str {}
-impl Primitive for num::BigRational {}
 impl Primitive for num::Rational64 {}
-impl Primitive for num::Rational32 {}
-impl Primitive for num::BigInt {}
-impl Primitive for OrderedFloat<f32> {}
-impl Primitive for OrderedFloat<f64> {}
 
 /// A wrapper used to print a primitive value.
 ///

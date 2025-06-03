@@ -75,7 +75,7 @@ pub struct EGraph {
     /// This is a cache of all the different panic messages that we may use while executing rules
     /// against the EGraph. Oftentimes, these messages are generated dynamically: keeping this map
     /// around allows us to cache external function ids with repeat panic messages and they can
-    /// also serve as a debugging tool in the c_lazyase that the number of panic messages grows without
+    /// also serve as a debugging tool in the case that the number of panic messages grows without
     /// bound.
     panic_funcs: HashMap<String, ExternalFunctionId>,
     proof_specs: DenseIdMap<ReasonSpecId, Arc<ProofReason>>,

@@ -14,7 +14,7 @@ pub(crate) fn parallelize_db_level_op(_db_size: usize) -> bool {
     }
     #[cfg(not(test))]
     {
-        _db_size > 10000 && rayon::current_num_threads() > 1
+        _db_size > 10_000 && rayon::current_num_threads() > 1
     }
 }
 
@@ -53,7 +53,7 @@ pub(crate) fn parallelize_intra_container_op(_num_containers: usize) -> bool {
     }
     #[cfg(not(test))]
     {
-        _num_containers > 1000 && rayon::current_num_threads() > 1
+        _num_containers > 1_000 && rayon::current_num_threads() > 1
     }
 }
 
