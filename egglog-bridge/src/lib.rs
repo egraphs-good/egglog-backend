@@ -986,8 +986,8 @@ impl EGraph {
         // TODO: we don't manually call merge_all in most of our APIs like
         // `run_rules`, so we have to immediately update the states.
         //
-        // This is also why `with_execute_state` of egglog-bridge takes a mutable self,
-        // while that of core-relations take an immutable self.
+        // This is not very efficient since it involves copying data around.
+        // we can consider expose direct updates methods or `merge_all`.
         self.db.merge_all();
         result
     }
