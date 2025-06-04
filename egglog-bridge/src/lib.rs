@@ -19,8 +19,8 @@ use std::{
 
 use core_relations::{
     ColumnId, Constraint, Container, Containers, CounterId, Database, DisplacedTable,
-    DisplacedTableWithProvenance, ExecutionState, ExternalFunction, ExternalFunctionId, MergeVal,
-    Offset, PlanStrategy, PrimitiveId, Primitives, RuleSetReport, SortedWritesTable, TableId,
+    DisplacedTableWithProvenance, ExternalFunction, ExternalFunctionId, MergeVal, Offset,
+    PlanStrategy, Pooled, PrimitiveId, Primitives, RuleSetReport, SortedWritesTable, TableId,
     TaggedRowBuffer, Value, WrappedTable,
 };
 use hashbrown::HashMap;
@@ -974,6 +974,108 @@ impl EGraph {
         rb.rebuild_row(table, &vars, &canon, subsume_var);
         rb.build()
     }
+
+    pub fn with_execution_state<R>(&mut self, f: impl Fn(ExecutionState<'_, '_>) -> R) -> R {
+        let result = self.db.with_execution_state(|state| {
+            f(ExecutionState {
+                state,
+                egraph: self,
+                scratch: Vec::new(),
+            })
+        });
+        // TODO: we don't manually call merge_all in most of our APIs like
+        // `run_rules`, so we have to immediately update the states.
+        //
+        // This is also why `with_execute_state` of egglog-bridge takes a mutable self,
+        // while that of core-relations take an immutable self.
+        self.db.merge_all();
+        result
+    }
+}
+
+pub struct ExecutionState<'a, 'b> {
+    state: &'a mut core_relations::ExecutionState<'b>,
+    egraph: &'a EGraph,
+    scratch: Vec<Value>,
+}
+
+impl<'a, 'b> ExecutionState<'a, 'b> {
+    /// Stage an insertion of the given row into `table`.
+    pub fn stage_insert(&mut self, function_id: FunctionId, row: &[Value], output: Option<Value>) {
+        let func = &self.egraph.funcs[function_id];
+        assert_eq!(func.schema.len(), row.len() + output.is_some() as usize);
+        let table = func.table;
+        let schema_math = SchemaMath {
+            tracing: self.egraph.tracing,
+            subsume: func.can_subsume,
+            func_cols: func.schema.len(),
+        };
+        self.scratch.clear();
+        let ts = self.egraph.next_ts().to_value();
+        self.scratch.extend(row);
+        schema_math.write_table_row(
+            &mut self.scratch,
+            RowVals {
+                timestamp: ts,
+                proof: None,
+                subsume: if func.can_subsume {
+                    Some(NOT_SUBSUMED)
+                } else {
+                    None
+                },
+                ret_val: output,
+            },
+        );
+        self.state.stage_insert(table, &self.scratch);
+    }
+
+    /// Stage a removal of the given row from `table` if it is present.
+    pub fn stage_remove(&mut self, function_id: FunctionId, key: &[Value]) {
+        let table = self.egraph.funcs[function_id].table;
+        self.state.stage_remove(table, key);
+    }
+
+    /// Call an external function.
+    pub fn call_external_func(
+        &mut self,
+        func: ExternalFunctionId,
+        args: &[Value],
+    ) -> Option<Value> {
+        self.state.call_external_func(func, args)
+    }
+
+    pub fn inc_counter(&self, ctr: CounterId) -> usize {
+        self.state.inc_counter(ctr)
+    }
+
+    pub fn read_counter(&self, ctr: CounterId) -> usize {
+        self.state.read_counter(ctr)
+    }
+
+    pub fn prims(&self) -> &Primitives {
+        self.state.prims()
+    }
+
+    pub fn containers(&self) -> &Containers {
+        self.state.containers()
+    }
+
+    /// Get the _current_ value for a given key in `table`, or otherwise insert
+    /// the unique _next_ value.
+    ///
+    /// Insertions into tables are not performed immediately, but rules and
+    /// merge functions sometimes need to get the result of an insertion. For
+    /// such cases, executions keep a cache of "predicted" values for a given
+    /// mapping that manage the insertions, etc.
+    pub fn predict_val(
+        &mut self,
+        function_id: FunctionId,
+        key: &[Value],
+        vals: impl ExactSizeIterator<Item = MergeVal>,
+    ) -> Pooled<Vec<Value>> {
+        let table = self.egraph.funcs[function_id].table;
+        self.state.predict_val(table, key, vals)
+    }
 }
 
 #[derive(Clone)]
@@ -1164,7 +1266,7 @@ impl MergeFn {
 }
 
 /// This enum is taking the place of a
-/// `Box<dyn Fn(&mut ExecutionState, Value, Value, Value) -> Value + Send + Sync>`
+/// `Box<dyn Fn(&mut core_relations::ExecutionState, Value, Value, Value) -> Value + Send + Sync>`
 /// to avoid extra boxes. It stores the data needed to run a `MergeFn` without
 /// holding onto any references, so it can be `move`d inside the `core_relations::MergeFn`.
 enum ResolvedMergeFn {
@@ -1191,7 +1293,13 @@ enum ResolvedMergeFn {
 }
 
 impl ResolvedMergeFn {
-    fn run(&self, state: &mut ExecutionState, cur: Value, new: Value, ts: Value) -> Value {
+    fn run(
+        &self,
+        state: &mut core_relations::ExecutionState,
+        cur: Value,
+        new: Value,
+        ts: Value,
+    ) -> Value {
         match self {
             ResolvedMergeFn::Const(v) => *v,
             ResolvedMergeFn::Old => cur,
@@ -1256,7 +1364,7 @@ impl ResolvedMergeFn {
 }
 
 /// This is an intern-able struct that holds all the data needed
-/// to do a "table lookup" on an [`ExecutionState`], assuming that
+/// to do a "table lookup" on an [`core_relations::ExecutionState`], assuming that
 /// the [`FunctionId`] for the table is known ahead of time.
 ///
 /// A "table lookup" is not a read-only operation. It will insert a row when
@@ -1289,7 +1397,7 @@ impl Lookup {
         }
     }
 
-    pub fn run(&self, state: &mut ExecutionState, args: &[Value]) -> Option<Value> {
+    pub fn run(&self, state: &mut core_relations::ExecutionState, args: &[Value]) -> Option<Value> {
         assert!(!self.table_math.tracing, "proofs not supported yet");
         match self.default {
             Some(default) => {
