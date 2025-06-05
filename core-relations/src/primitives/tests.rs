@@ -236,7 +236,7 @@ fn roundtrip_medium_integers_interned() {
     }
     // Random i64 samples (values outside 31-bit range)
     for _ in 0..50 {
-        let val: i64 = rng.gen_range(i64::MIN..=0);
+        let val: i64 = rng.gen_range(i64::MIN..0);
         let boxed = prims.get(val);
         let unboxed = prims.unwrap::<i64>(boxed);
         assert_eq!(val, unboxed);
@@ -275,7 +275,7 @@ fn roundtrip_medium_integers_interned() {
         }
         // Random isize samples (values outside 31-bit range)
         for _ in 0..50 {
-            let val: isize = rng.gen_range(isize::MIN..=0);
+            let val: isize = rng.gen_range(isize::MIN..0);
             let boxed = prims.get(val);
             let unboxed = prims.unwrap::<isize>(boxed);
             assert_eq!(val, unboxed);
