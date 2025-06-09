@@ -326,9 +326,7 @@ impl EGraph {
             .get_table(table_id)
             .new_buffer()
             .stage_insert(&extended_row);
-        self.db.merge_all();
-        self.inc_ts();
-        self.rebuild().unwrap();
+        self.flush_updates();
         self.get_canon(res)
     }
 
@@ -442,9 +440,7 @@ impl EGraph {
         }
         // Flush the buffers.
         mem::drop(bufs);
-        self.db.merge_all();
-        self.inc_ts();
-        self.rebuild().unwrap();
+        self.flush_updates();
     }
 
     pub fn approx_table_size(&self, table: FunctionId) -> usize {
@@ -978,7 +974,7 @@ impl EGraph {
 
     /// Gives the user a handle to the underlying ExecutionState. Useful for staging updates
     /// to the database.
-    /// 
+    ///
     /// The staged updates are not immediately reflected in the EGraph, so you may want to
     /// manually flush the updates using [`EGraph::flush_updates`].
     pub fn with_execution_state<R>(&self, f: impl FnOnce(&mut ExecutionState<'_>) -> R) -> R {
@@ -986,8 +982,12 @@ impl EGraph {
     }
 
     /// Flush the pending update buffers to the EGraph.
+    /// Returns `true` if the database is updated.
     pub fn flush_updates(&mut self) -> bool {
-        self.db.merge_all()
+        let updated = self.db.merge_all();
+        self.inc_ts();
+        self.rebuild().unwrap();
+        updated
     }
 }
 
