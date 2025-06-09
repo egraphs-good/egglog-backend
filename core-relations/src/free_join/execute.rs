@@ -2,7 +2,7 @@
 
 use std::{
     iter, mem,
-    sync::{atomic::AtomicUsize, Arc},
+    sync::{atomic::AtomicUsize, Arc, OnceLock},
 };
 
 use numeric_id::{DenseIdMap, IdVec, NumericId};
@@ -43,7 +43,7 @@ enum DynamicIndex {
 }
 
 struct Prober {
-    subset: Subset,
+    node: TrieNode,
     pool: Pool<SortedOffsetVector>,
     ix: DynamicIndex,
 }
@@ -57,7 +57,7 @@ impl Prober {
             } => {
                 let mut sub = table.get().unwrap().get_subset(key)?.to_owned(&self.pool);
                 if *intersect_outer {
-                    sub.intersect(self.subset.as_ref(), &self.pool);
+                    sub.intersect(self.node.subset.as_ref(), &self.pool);
                     if sub.is_empty() {
                         return None;
                     }
@@ -75,7 +75,7 @@ impl Prober {
                     .get_subset(&key[0])?
                     .to_owned(&self.pool);
                 if *intersect_outer {
-                    sub.intersect(self.subset.as_ref(), &self.pool);
+                    sub.intersect(self.node.subset.as_ref(), &self.pool);
                     if sub.is_empty() {
                         return None;
                     }
@@ -95,7 +95,7 @@ impl Prober {
                 table,
             } => table.get().unwrap().for_each(|k, v| {
                 let mut res = v.to_owned(&self.pool);
-                res.intersect(self.subset.as_ref(), &self.pool);
+                res.intersect(self.node.subset.as_ref(), &self.pool);
                 if !res.is_empty() {
                     f(k, res.as_ref())
                 }
@@ -110,7 +110,7 @@ impl Prober {
             } => {
                 table.get().unwrap().for_each(|k, v| {
                     let mut res = v.to_owned(&self.pool);
-                    res.intersect(self.subset.as_ref(), &self.pool);
+                    res.intersect(self.node.subset.as_ref(), &self.pool);
                     if !res.is_empty() {
                         f(&[*k], res.as_ref())
                     }
@@ -162,7 +162,7 @@ impl Database {
                         let mut binding_info = BindingInfo::default();
                         for (id, info) in plan.atoms.iter() {
                             let table = join_state.db.get_table(info.table);
-                            binding_info.subsets.insert(id, table.all());
+                            binding_info.insert_subset(id, table.all());
                         }
 
                         let search_and_apply_timer = Instant::now();
@@ -199,7 +199,7 @@ impl Database {
                 let mut binding_info = BindingInfo::default();
                 for (id, info) in plan.atoms.iter() {
                     let table = join_state.db.get_table(info.table);
-                    binding_info.subsets.insert(id, table.all());
+                    binding_info.insert_subset(id, table.all());
                 }
 
                 let search_and_apply_timer = Instant::now();
@@ -255,10 +255,67 @@ struct JoinState<'a> {
     index_cache: &'a IndexCache,
 }
 
+/// Information about the current subset of an atom's relation that is being considered, along with
+/// lazily-initialized, cached indexes on that subset.
+struct TrieNode {
+    /// The actual subset of the corresponding atom.
+    subset: Subset,
+    /// Any cached indexes on this subset.
+    cached_subsets: OnceLock<Arc<Pooled<IdVec<ColumnId, OnceLock<Arc<ColumnIndex>>>>>>,
+}
+
+impl TrieNode {
+    fn size(&self) -> usize {
+        self.subset.size()
+    }
+}
+
+impl Clone for TrieNode {
+    fn clone(&self) -> Self {
+        let cached_subsets = OnceLock::new();
+        if let Some(cached) = self.cached_subsets.get() {
+            cached_subsets.set(cached.clone()).ok().unwrap();
+        }
+        Self {
+            subset: self.subset.clone(),
+            cached_subsets,
+        }
+    }
+}
+
 #[derive(Default, Clone)]
 struct BindingInfo {
     bindings: DenseIdMap<Variable, Value>,
-    subsets: DenseIdMap<AtomId, Subset>,
+    subsets: DenseIdMap<AtomId, TrieNode>,
+}
+
+impl BindingInfo {
+    /// Initializes the atom-related metadata in the [`BindingInfo`].
+    fn insert_subset(&mut self, atom: AtomId, subset: Subset) {
+        let node = TrieNode {
+            subset,
+            cached_subsets: Default::default(),
+        };
+        self.subsets.insert(atom, node);
+    }
+
+    /// Probers returned from [`JoinState::get_index`] will move atom-related state out of the
+    /// [`BindingInfo`]. Once the caller is done using a prober, this method moves it back.
+    fn move_back(&mut self, atom: AtomId, prober: Prober) {
+        self.subsets.insert(atom, prober.node);
+    }
+
+    fn move_back_node(&mut self, atom: AtomId, node: TrieNode) {
+        self.subsets.insert(atom, node);
+    }
+
+    fn has_empty_subset(&self, atom: AtomId) -> bool {
+        self.subsets[atom].subset.is_empty()
+    }
+
+    fn unwrap_val(&mut self, atom: AtomId) -> TrieNode {
+        self.subsets.unwrap_val(atom)
+    }
 }
 
 impl<'a> JoinState<'a> {
@@ -278,7 +335,8 @@ impl<'a> JoinState<'a> {
         cols: impl Iterator<Item = ColumnId>,
     ) -> Prober {
         let cols = SmallVec::<[ColumnId; 4]>::from_iter(cols);
-        let subset = binding_info.subsets.unwrap_val(atom);
+        let trie_node = binding_info.subsets.unwrap_val(atom);
+        let subset = &trie_node.subset;
 
         let table_id = plan.atoms[atom].table;
         let info = &self.db.tables[table_id];
@@ -314,6 +372,7 @@ impl<'a> JoinState<'a> {
                 }
             }
         } else if cols.len() != 1 {
+            // NB: we should have a caching strategy for non-column indexes.
             DynamicIndex::Dynamic(info.table.group_by_key(subset.as_ref(), &cols))
         } else {
             DynamicIndex::DynamicColumn(if subset.size() > 16 {
@@ -329,7 +388,7 @@ impl<'a> JoinState<'a> {
             })
         };
         Prober {
-            subset,
+            node: trie_node,
             pool: with_pool_set(|ps| ps.get_pool().clone()),
             ix: dyn_index,
         }
@@ -365,9 +424,11 @@ impl<'a> JoinState<'a> {
             if subset.is_empty() {
                 return;
             }
-            let mut cur = binding_info.subsets.unwrap_val(*atom);
-            cur.intersect(subset.as_ref(), &with_pool_set(|ps| ps.get_pool()));
-            binding_info.subsets.insert(*atom, cur);
+            let mut cur = binding_info.unwrap_val(*atom);
+            debug_assert!(cur.cached_subsets.get().is_none());
+            cur.subset
+                .intersect(subset.as_ref(), &with_pool_set(|ps| ps.get_pool()));
+            binding_info.move_back_node(*atom, cur);
         }
         let mut order: Pooled<Vec<u32>> = with_pool_set(|ps| ps.get());
         order.extend(
@@ -418,7 +479,7 @@ impl<'a> JoinState<'a> {
                             binding_info.bindings.insert(var, val);
                         }
                         for (atom, subset) in update.refinements.drain(..) {
-                            binding_info.subsets.insert(atom, subset);
+                            binding_info.insert_subset(atom, subset);
                         }
                         self.run_plan(
                             plan,
@@ -447,7 +508,7 @@ impl<'a> JoinState<'a> {
                                 binding_info.bindings.insert(var, val);
                             }
                             for (atom, subset) in update.refinements.drain(..) {
-                                binding_info.subsets.insert(atom, subset);
+                                binding_info.insert_subset(atom, subset);
                             }
                             JoinState {
                                 db,
@@ -480,7 +541,7 @@ impl<'a> JoinState<'a> {
             JoinStage::Intersect { var, scans } => match scans.as_slice() {
                 [] => {}
                 [a] if a.cs.is_empty() => {
-                    if binding_info.subsets[a.atom].is_empty() {
+                    if binding_info.has_empty_subset(a.atom) {
                         return;
                     }
 
@@ -504,10 +565,10 @@ impl<'a> JoinState<'a> {
                         updates
                     });
                     drain_updates!(updates);
-                    binding_info.subsets.insert(a.atom, prober.subset);
+                    binding_info.move_back(a.atom, prober);
                 }
                 [a] => {
-                    if binding_info.subsets[a.atom].is_empty() {
+                    if binding_info.has_empty_subset(a.atom) {
                         return;
                     }
                     let prober = self.get_column_index(plan, binding_info, a.atom, a.column);
@@ -530,7 +591,7 @@ impl<'a> JoinState<'a> {
                         updates
                     });
                     drain_updates!(updates);
-                    binding_info.subsets.insert(a.atom, prober.subset);
+                    binding_info.move_back(a.atom, prober);
                 }
                 [a, b] => {
                     let mut updates: Pooled<Vec<Pooled<FrameUpdate>>> = with_pool_set(PoolSet::get);
@@ -578,8 +639,8 @@ impl<'a> JoinState<'a> {
                     });
                     drain_updates!(updates);
 
-                    binding_info.subsets.insert(a.atom, a_prober.subset);
-                    binding_info.subsets.insert(b.atom, b_prober.subset);
+                    binding_info.move_back(a.atom, a_prober);
+                    binding_info.move_back(b.atom, b_prober);
                 }
                 rest => {
                     let mut updates: Pooled<Vec<Pooled<FrameUpdate>>> = with_pool_set(PoolSet::get);
@@ -641,7 +702,7 @@ impl<'a> JoinState<'a> {
                         drain_updates!(updates);
                     }
                     for (spec, prober) in rest.iter().zip(probers.into_iter()) {
-                        binding_info.subsets.insert(spec.atom, prober.subset);
+                        binding_info.move_back(spec.atom, prober);
                     }
                 }
             },
@@ -651,19 +712,20 @@ impl<'a> JoinState<'a> {
                 to_intersect,
             } if to_intersect.is_empty() => {
                 let cover_atom = cover.to_index.atom;
-                if binding_info.subsets[cover_atom].is_empty() {
+                if binding_info.has_empty_subset(cover_atom) {
                     return;
                 }
                 let mut updates: Pooled<Vec<Pooled<FrameUpdate>>> = with_pool_set(PoolSet::get);
                 let proj = SmallVec::<[ColumnId; 4]>::from_iter(bind.iter().map(|(col, _)| *col));
-                let cover_subset = binding_info.subsets.unwrap_val(cover_atom);
+                let cover_node = binding_info.unwrap_val(cover_atom);
+                let cover_subset = cover_node.subset.as_ref();
                 let mut cur = Offset::new(0);
                 let mut buffer = TaggedRowBuffer::new(bind.len());
                 loop {
                     buffer.clear();
                     let table = &self.db.tables[plan.atoms[cover_atom].table].table;
                     let next = table.scan_project(
-                        cover_subset.as_ref(),
+                        cover_subset,
                         &proj,
                         cur,
                         chunk_size,
@@ -693,7 +755,7 @@ impl<'a> JoinState<'a> {
                 }
                 drain_updates!(updates);
                 // Restore the subsets we swapped out.
-                binding_info.subsets.insert(cover_atom, cover_subset);
+                binding_info.move_back_node(cover_atom, cover_node);
             }
             JoinStage::FusedIntersect {
                 cover,
@@ -701,7 +763,7 @@ impl<'a> JoinState<'a> {
                 to_intersect,
             } => {
                 let cover_atom = cover.to_index.atom;
-                if binding_info.subsets[cover_atom].is_empty() {
+                if binding_info.has_empty_subset(cover_atom) {
                     return;
                 }
                 let index_probers = to_intersect
@@ -722,14 +784,15 @@ impl<'a> JoinState<'a> {
                     .collect::<SmallVec<[(usize, AtomId, Prober); 4]>>();
                 let mut updates: Pooled<Vec<Pooled<FrameUpdate>>> = with_pool_set(PoolSet::get);
                 let proj = SmallVec::<[ColumnId; 4]>::from_iter(bind.iter().map(|(col, _)| *col));
-                let cover_subset = binding_info.subsets.unwrap_val(cover_atom);
+                let cover_node = binding_info.unwrap_val(cover_atom);
+                let cover_subset = cover_node.subset.as_ref();
                 let mut cur = Offset::new(0);
                 let mut buffer = TaggedRowBuffer::new(bind.len());
                 loop {
                     buffer.clear();
                     let table = &self.db.tables[plan.atoms[cover_atom].table].table;
                     let next = table.scan_project(
-                        cover_subset.as_ref(),
+                        cover_subset,
                         &proj,
                         cur,
                         chunk_size,
@@ -786,9 +849,9 @@ impl<'a> JoinState<'a> {
                 // table).
                 drain_updates!(updates);
                 // Restore the subsets we swapped out.
-                binding_info.subsets.insert(cover_atom, cover_subset);
+                binding_info.move_back_node(cover_atom, cover_node);
                 for (_, atom, prober) in index_probers {
-                    binding_info.subsets.insert(atom, prober.subset);
+                    binding_info.move_back(atom, prober);
                 }
             }
         }
