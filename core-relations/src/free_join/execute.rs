@@ -26,8 +26,7 @@ use crate::{
 use super::{
     get_column_index_from_tableinfo,
     plan::{JoinHeader, JoinStage, Plan},
-    with_pool_set, ActionId, AtomId, Database, HashColumnIndex, HashIndex, TableId, TableInfo,
-    Variable,
+    with_pool_set, ActionId, AtomId, Database, HashColumnIndex, HashIndex, TableInfo, Variable,
 };
 
 enum DynamicIndex {
@@ -148,7 +147,6 @@ impl Database {
             return RuleSetReport::default();
         }
         let preds = with_pool_set(|ps| ps.get::<PredictedVals>());
-        let index_cache = IndexCache::default();
         let match_counter = MatchCounter::new(rule_set.actions.n_ids());
 
         let search_and_apply_timer = Instant::now();
@@ -157,7 +155,7 @@ impl Database {
             rayon::in_place_scope(|scope| {
                 for (plan, desc, _action) in rule_set.plans.values() {
                     scope.spawn(|scope| {
-                        let join_state = JoinState::new(self, &preds, &index_cache);
+                        let join_state = JoinState::new(self, &preds);
                         let mut action_buf =
                             ScopedActionBuffer::new(scope, rule_set, &match_counter);
                         let mut binding_info = BindingInfo::default();
@@ -188,7 +186,7 @@ impl Database {
                 }
             });
         } else {
-            let join_state = JoinState::new(self, &preds, &index_cache);
+            let join_state = JoinState::new(self, &preds);
             // Just run all of the plans in order with a single in-place action
             // buffer.
             let mut action_buf = InPlaceActionBuffer {
@@ -248,12 +246,9 @@ struct ActionState {
     bindings: Bindings,
 }
 
-type IndexCache = DashMap<(ColumnId, TableId, Subset), Arc<ColumnIndex>>;
-
 struct JoinState<'a> {
     db: &'a Database,
     preds: &'a PredictedVals,
-    index_cache: &'a IndexCache,
 }
 
 type ColumnIndexes = IdVec<ColumnId, OnceLock<Arc<ColumnIndex>>>;
@@ -340,12 +335,8 @@ impl BindingInfo {
 }
 
 impl<'a> JoinState<'a> {
-    fn new(db: &'a Database, preds: &'a PredictedVals, index_cache: &'a IndexCache) -> Self {
-        Self {
-            db,
-            preds,
-            index_cache,
-        }
+    fn new(db: &'a Database, preds: &'a PredictedVals) -> Self {
+        Self { db, preds }
     }
 
     fn get_index(
@@ -505,7 +496,6 @@ impl<'a> JoinState<'a> {
             ($updates:expr) => {{
                 let mut updates = mem::take(&mut $updates);
                 let predicted = self.preds;
-                let index_cache = self.index_cache;
                 let db = self.db;
                 let next_order = Pooled::cloned(&instr_order);
                 action_buf.recur(
@@ -522,7 +512,6 @@ impl<'a> JoinState<'a> {
                             JoinState {
                                 db,
                                 preds: predicted,
-                                index_cache,
                             }
                             .run_plan(
                                 plan,
