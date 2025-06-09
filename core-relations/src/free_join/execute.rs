@@ -26,7 +26,8 @@ use crate::{
 use super::{
     get_column_index_from_tableinfo,
     plan::{JoinHeader, JoinStage, Plan},
-    with_pool_set, ActionId, AtomId, Database, HashColumnIndex, HashIndex, TableId, Variable,
+    with_pool_set, ActionId, AtomId, Database, HashColumnIndex, HashIndex, TableId, TableInfo,
+    Variable,
 };
 
 enum DynamicIndex {
@@ -255,18 +256,38 @@ struct JoinState<'a> {
     index_cache: &'a IndexCache,
 }
 
+type ColumnIndexes = IdVec<ColumnId, OnceLock<Arc<ColumnIndex>>>;
+
 /// Information about the current subset of an atom's relation that is being considered, along with
 /// lazily-initialized, cached indexes on that subset.
+///
+/// This is the standard trie-node used in lazy implementations of GJ as in the original egglog
+/// implementation and the FJ paper. It currently does not handle non-column indexes, but that
+/// should be a fairly straightforward extension if we start generating plans that need those.
+/// (Right now, most plans iterating over more than one column just do a scan anyway).
 struct TrieNode {
     /// The actual subset of the corresponding atom.
     subset: Subset,
     /// Any cached indexes on this subset.
-    cached_subsets: OnceLock<Arc<Pooled<IdVec<ColumnId, OnceLock<Arc<ColumnIndex>>>>>>,
+    cached_subsets: OnceLock<Arc<Pooled<ColumnIndexes>>>,
 }
 
 impl TrieNode {
     fn size(&self) -> usize {
         self.subset.size()
+    }
+    fn get_cached_index(&self, col: ColumnId, info: &TableInfo) -> Arc<ColumnIndex> {
+        self.cached_subsets.get_or_init(|| {
+            // Pre-size the vector so we do not need to borrow it mutably to initialize the index.
+            let mut vec: Pooled<ColumnIndexes> = with_pool_set(|ps| ps.get());
+            vec.resize_with(info.spec.arity(), OnceLock::new);
+            Arc::new(vec)
+        })[col]
+            .get_or_init(|| {
+                let col_index = info.table.group_by_col(self.subset.as_ref(), col);
+                Arc::new(col_index)
+            })
+            .clone()
     }
 }
 
@@ -349,44 +370,32 @@ impl<'a> JoinState<'a> {
                 .unwrap_or(false)
         });
         let whole_table = info.table.all();
-        let dyn_index = if all_cacheable
-            && subset.is_dense()
-            && whole_table.size() / 2 < subset.size()
-        {
-            // Skip intersecting with the subset if we are just looking at the
-            // whole table.
-            let intersect_outer =
-                !(whole_table.is_dense() && subset.bounds() == whole_table.bounds());
-            // heuristic: if the subset we are scanning is somewhat
-            // large _or_ it is most of the table, or we already have a cached
-            // index for it, then return it.
-            if cols.len() != 1 {
-                DynamicIndex::Cached {
-                    intersect_outer,
-                    table: get_index_from_tableinfo(info, &cols).clone(),
+        let dyn_index =
+            if all_cacheable && subset.is_dense() && whole_table.size() / 2 < subset.size() {
+                // Skip intersecting with the subset if we are just looking at the
+                // whole table.
+                let intersect_outer =
+                    !(whole_table.is_dense() && subset.bounds() == whole_table.bounds());
+                // heuristic: if the subset we are scanning is somewhat
+                // large _or_ it is most of the table, or we already have a cached
+                // index for it, then return it.
+                if cols.len() != 1 {
+                    DynamicIndex::Cached {
+                        intersect_outer,
+                        table: get_index_from_tableinfo(info, &cols).clone(),
+                    }
+                } else {
+                    DynamicIndex::CachedColumn {
+                        intersect_outer,
+                        table: get_column_index_from_tableinfo(info, cols[0]).clone(),
+                    }
                 }
+            } else if cols.len() != 1 {
+                // NB: we should have a caching strategy for non-column indexes.
+                DynamicIndex::Dynamic(info.table.group_by_key(subset.as_ref(), &cols))
             } else {
-                DynamicIndex::CachedColumn {
-                    intersect_outer,
-                    table: get_column_index_from_tableinfo(info, cols[0]).clone(),
-                }
-            }
-        } else if cols.len() != 1 {
-            // NB: we should have a caching strategy for non-column indexes.
-            DynamicIndex::Dynamic(info.table.group_by_key(subset.as_ref(), &cols))
-        } else {
-            DynamicIndex::DynamicColumn(if subset.size() > 16 {
-                // NB: we could use the raw api here to avoid cloning the subset
-                // on a cache hit.
-                let entry = self.index_cache.entry((cols[0], table_id, subset.clone()));
-                entry
-                    .or_insert_with(|| Arc::new(info.table.group_by_col(subset.as_ref(), cols[0])))
-                    .value()
-                    .clone()
-            } else {
-                Arc::new(info.table.group_by_col(subset.as_ref(), cols[0]))
-            })
-        };
+                DynamicIndex::DynamicColumn(trie_node.get_cached_index(cols[0], info))
+            };
         Prober {
             node: trie_node,
             pool: with_pool_set(|ps| ps.get_pool().clone()),
