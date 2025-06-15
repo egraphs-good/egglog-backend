@@ -20,6 +20,10 @@ use self::mask::{Mask, MaskIter, ValueSource};
 
 pub(crate) mod mask;
 
+/// Threshold for choosing between vectorized and non-vectorized execution.
+/// When the number of bound variables is below this threshold, non-vectorized execution is used.
+const VECTORIZATION_THRESHOLD: usize = 8;
+
 #[cfg(test)]
 mod tests;
 
@@ -365,17 +369,43 @@ impl ExecutionState<'_> {
             // If we have no variables, we want to run the rules once.
             bindings.matches = 1;
         }
-        with_pool_set(|ps| {
-            let mut mask = Mask::new(0..bindings.matches, ps);
-            for instr in instrs {
-                if mask.is_empty() {
-                    break;
+
+        // Choose execution strategy based on number of bindings
+        if bindings.matches < VECTORIZATION_THRESHOLD {
+            // Non-vectorized execution for small batch sizes. This avoids the need for a large
+            // number of temporary vectors and masks.
+            let mut scratch = with_pool_set(|ps| ps.get::<Vec<Value>>());
+            let mut single_bindings = DenseIdMap::new();
+
+            for binding_idx in 0..bindings.matches {
+                single_bindings.clear();
+                // Extract bindings for this row
+                for (var, vals) in bindings.vars.iter() {
+                    if binding_idx < vals.len() {
+                        single_bindings.insert(var, vals[binding_idx]);
+                    }
                 }
-                self.run_instr(&mut mask, instr, bindings, ps);
+
+                for instr in instrs {
+                    if !self.run_instr(instr, &mut single_bindings, &mut scratch) {
+                        break;
+                    }
+                }
             }
-        })
+        } else {
+            // Vectorized execution for larger batch sizes
+            with_pool_set(|ps| {
+                let mut mask = Mask::new(0..bindings.matches, ps);
+                for instr in instrs {
+                    if mask.is_empty() {
+                        break;
+                    }
+                    self.run_instr_vectorized(&mut mask, instr, bindings, ps);
+                }
+            })
+        }
     }
-    fn run_instr(
+    fn run_instr_vectorized(
         &mut self,
         mask: &mut Mask,
         inst: &Instr,
@@ -648,6 +678,228 @@ impl ExecutionState<'_> {
                 let ctr_val = Value::from_usize(self.read_counter(*counter));
                 vals.resize(bindings.matches, ctr_val);
                 bindings.insert(*dst, vals);
+            }
+        }
+    }
+
+    fn run_instr(
+        &mut self,
+        inst: &Instr,
+        bindings: &mut DenseIdMap<Variable, Value>,
+        scratch: &mut Vec<Value>,
+    ) -> bool {
+        fn assert_impl(
+            bindings: &DenseIdMap<Variable, Value>,
+            l: &QueryEntry,
+            r: &QueryEntry,
+            op: impl Fn(Value, Value) -> bool,
+        ) -> bool {
+            let l_val = match l {
+                QueryEntry::Var(v) => bindings[*v],
+                QueryEntry::Const(c) => *c,
+            };
+            let r_val = match r {
+                QueryEntry::Var(v) => bindings[*v],
+                QueryEntry::Const(c) => *c,
+            };
+            op(l_val, r_val)
+        }
+
+        fn eval_query_entry(entry: &QueryEntry, bindings: &DenseIdMap<Variable, Value>) -> Value {
+            match entry {
+                QueryEntry::Var(v) => bindings[*v],
+                QueryEntry::Const(c) => *c,
+            }
+        }
+
+        fn eval_write_val(
+            val: &WriteVal,
+            bindings: &DenseIdMap<Variable, Value>,
+            row: &[Value],
+            exec_state: &ExecutionState,
+        ) -> Value {
+            match val {
+                WriteVal::QueryEntry(entry) => eval_query_entry(entry, bindings),
+                WriteVal::IncCounter(ctr) => Value::from_usize(exec_state.inc_counter(*ctr)),
+                WriteVal::CurrentVal(ix) => row[*ix],
+            }
+        }
+
+        match inst {
+            Instr::LookupOrInsertDefault {
+                table: table_id,
+                args,
+                default,
+                dst_col,
+                dst_var,
+            } => {
+                scratch.clear();
+                scratch.extend(args.iter().map(|arg| eval_query_entry(arg, bindings)));
+                let table = &self.db.table_info[*table_id].table;
+
+                if let Some(val) = table.get_row_column(scratch, *dst_col) {
+                    bindings.insert(*dst_var, val);
+                    return true;
+                }
+
+                let prediction_key = (*table_id, SmallVec::<[Value; 3]>::from_slice(scratch));
+                if let Some(predicted_row) = self.predicted.data.get(&prediction_key) {
+                    bindings.insert(*dst_var, predicted_row[dst_col.index()]);
+                    return true;
+                }
+
+                scratch.reserve(default.len());
+                for val in default {
+                    let val = eval_write_val(val, bindings, scratch, self);
+                    scratch.push(val);
+                }
+
+                let predicted_row = with_pool_set(|ps| {
+                    let mut pooled = ps.get::<Vec<Value>>();
+                    pooled.extend_from_slice(scratch);
+                    pooled
+                });
+
+                bindings.insert(*dst_var, predicted_row[dst_col.index()]);
+                self.predicted.data.insert(prediction_key, predicted_row);
+
+                self.buffers
+                    .get_or_insert(*table_id, || {
+                        self.db.table_info[*table_id].table.new_buffer()
+                    })
+                    .stage_insert(scratch);
+                self.changed = true;
+                true
+            }
+            Instr::LookupWithDefault {
+                table,
+                args,
+                dst_col,
+                dst_var,
+                default,
+            } => {
+                scratch.clear();
+                scratch.extend(args.iter().map(|arg| eval_query_entry(arg, bindings)));
+                let table = &self.db.table_info[*table].table;
+
+                if let Some(val) = table.get_row_column(scratch, *dst_col) {
+                    bindings.insert(*dst_var, val);
+                    true
+                } else {
+                    bindings.insert(*dst_var, eval_query_entry(default, bindings));
+                    true
+                }
+            }
+            Instr::Lookup {
+                table,
+                args,
+                dst_col,
+                dst_var,
+            } => {
+                scratch.clear();
+                scratch.extend(args.iter().map(|arg| eval_query_entry(arg, bindings)));
+                let table = &self.db.table_info[*table].table;
+
+                if let Some(row) = table.get_row(scratch) {
+                    bindings.insert(*dst_var, row.vals[dst_col.index()]);
+                    true
+                } else {
+                    false
+                }
+            }
+            Instr::LookupWithFallback {
+                table: table_id,
+                table_key,
+                func,
+                func_args,
+                dst_col,
+                dst_var,
+            } => {
+                scratch.clear();
+                scratch.extend(table_key.iter().map(|arg| eval_query_entry(arg, bindings)));
+                let table = &self.db.table_info[*table_id].table;
+
+                if let Some(val) = table.get_row_column(scratch, *dst_col) {
+                    bindings.insert(*dst_var, val);
+                    return true;
+                }
+
+                scratch.clear();
+                scratch.extend(func_args.iter().map(|arg| eval_query_entry(arg, bindings)));
+                if let Some(val) = self.db.external_funcs[*func].invoke(self, scratch) {
+                    bindings.insert(*dst_var, val);
+                    true
+                } else {
+                    false
+                }
+            }
+            Instr::Insert { table, vals } => {
+                scratch.clear();
+                scratch.extend(vals.iter().map(|val| eval_query_entry(val, bindings)));
+                self.stage_insert(*table, scratch);
+                true
+            }
+            Instr::InsertIfEq { table, l, r, vals } => {
+                if assert_impl(bindings, l, r, |l, r| l == r) {
+                    scratch.clear();
+                    scratch.extend(vals.iter().map(|val| eval_query_entry(val, bindings)));
+                    self.stage_insert(*table, scratch);
+                }
+                true
+            }
+            Instr::Remove { table, args } => {
+                scratch.clear();
+                scratch.extend(args.iter().map(|arg| eval_query_entry(arg, bindings)));
+                self.stage_remove(*table, scratch);
+                true
+            }
+            Instr::External { func, args, dst } => {
+                scratch.clear();
+                scratch.extend(args.iter().map(|arg| eval_query_entry(arg, bindings)));
+                if let Some(val) = self.db.external_funcs[*func].invoke(self, scratch) {
+                    bindings.insert(*dst, val);
+                    true
+                } else {
+                    false
+                }
+            }
+            Instr::ExternalWithFallback {
+                f1,
+                args1,
+                f2,
+                args2,
+                dst,
+            } => {
+                scratch.clear();
+                scratch.extend(args1.iter().map(|arg| eval_query_entry(arg, bindings)));
+                if let Some(val) = self.db.external_funcs[*f1].invoke(self, scratch) {
+                    bindings.insert(*dst, val);
+                    return true;
+                }
+
+                scratch.clear();
+                scratch.extend(args2.iter().map(|arg| eval_query_entry(arg, bindings)));
+                if let Some(val) = self.db.external_funcs[*f2].invoke(self, scratch) {
+                    bindings.insert(*dst, val);
+                    true
+                } else {
+                    false
+                }
+            }
+            Instr::AssertAnyNe { ops, divider } => {
+                scratch.clear();
+                scratch.extend(ops.iter().map(|op| eval_query_entry(op, bindings)));
+                scratch[0..*divider]
+                    .iter()
+                    .zip(&scratch[*divider..])
+                    .any(|(l, r)| l != r)
+            }
+            Instr::AssertEq(l, r) => assert_impl(bindings, l, r, |l, r| l == r),
+            Instr::AssertNe(l, r) => assert_impl(bindings, l, r, |l, r| l != r),
+            Instr::ReadCounter { counter, dst } => {
+                let val = Value::from_usize(self.read_counter(*counter));
+                bindings.insert(*dst, val);
+                true
             }
         }
     }
