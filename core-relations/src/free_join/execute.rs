@@ -430,12 +430,9 @@ impl<'a> JoinState<'a> {
                 .intersect(subset.as_ref(), &with_pool_set(|ps| ps.get_pool()));
             binding_info.move_back_node(*atom, cur);
         }
-        let mut order: Pooled<Vec<u32>> = with_pool_set(|ps| ps.get());
-        order.extend(
-            0..u32::try_from(plan.stages.instrs.len()).expect("plans should be smaller than this"),
-        );
-        sort_plan_by_size(order.as_mut_slice(), &plan.stages.instrs, binding_info);
-        self.run_plan(plan, order, 0, binding_info, action_buf);
+        let mut order = InstrOrder::from_iter(0..plan.stages.instrs.len());
+        sort_plan_by_size(&mut order, 0, &plan.stages.instrs, binding_info);
+        self.run_plan(plan, &mut order, 0, binding_info, action_buf);
     }
 
     /// The core method for executing a free join plan.
@@ -449,24 +446,27 @@ impl<'a> JoinState<'a> {
     fn run_plan<'buf, BUF: ActionBuffer<'buf>>(
         &self,
         plan: &'a Plan,
-        mut instr_order: Pooled<Vec<u32>>,
+        instr_order: &mut InstrOrder,
         cur: usize,
         binding_info: &mut BindingInfo,
         action_buf: &mut BUF,
     ) where
         'a: 'buf,
     {
+        let remove_all_inline_never = 1;
         if cur >= instr_order.len() {
-            action_buf.push_bindings(plan.stages.actions, &binding_info.bindings, || {
-                ExecutionState::new(self.preds, self.db.read_only_view(), Default::default())
+            push_bindings(|| {
+                action_buf.push_bindings(plan.stages.actions, &binding_info.bindings, || {
+                    ExecutionState::new(self.preds, self.db.read_only_view(), Default::default())
+                });
             });
             return;
         }
         let chunk_size = action_buf.morsel_size(cur, instr_order.len());
-        let cur_size = estimate_size(&plan.stages.instrs[instr_order[cur] as usize], binding_info);
+        let cur_size = estimate_size(&plan.stages.instrs[instr_order.get(cur)], binding_info);
         if cur_size > 32 && cur < instr_order.len() - 1 {
             // If we have a reasonable number of tuples to process, adjust the variable order.
-            sort_plan_by_size(&mut instr_order[cur..], &plan.stages.instrs, binding_info);
+            sort_plan_by_size(instr_order, cur, &plan.stages.instrs, binding_info);
         }
         // Helper macro (not its own method to appease the borrow checker).
         macro_rules! drain_updates {
@@ -474,55 +474,55 @@ impl<'a> JoinState<'a> {
                 if cur == 0 || cur == 1 {
                     drain_updates_parallel!($updates)
                 } else {
-                    for mut update in $updates.drain(..) {
-                        for (var, val) in update.bindings.drain(..) {
-                            binding_info.bindings.insert(var, val);
-                        }
-                        for (atom, subset) in update.refinements.drain(..) {
-                            binding_info.insert_subset(atom, subset);
-                        }
-                        self.run_plan(
-                            plan,
-                            Pooled::cloned(&instr_order),
-                            cur + 1,
-                            binding_info,
-                            action_buf,
-                        );
-                    }
-                }
-            };
-        }
-        macro_rules! drain_updates_parallel {
-            ($updates:expr) => {{
-                let mut updates = mem::take(&mut $updates);
-                let predicted = self.preds;
-                let db = self.db;
-                let next_order = Pooled::cloned(&instr_order);
-                action_buf.recur(
-                    binding_info,
-                    move || ExecutionState::new(predicted, db.read_only_view(), Default::default()),
-                    move |binding_info, buf| {
-                        for mut update in updates.drain(..) {
+                    drain_reg(|| {
+                        for mut update in $updates.drain(..) {
                             for (var, val) in update.bindings.drain(..) {
                                 binding_info.bindings.insert(var, val);
                             }
                             for (atom, subset) in update.refinements.drain(..) {
                                 binding_info.insert_subset(atom, subset);
                             }
-                            JoinState {
-                                db,
-                                preds: predicted,
-                            }
-                            .run_plan(
-                                plan,
-                                Pooled::cloned(&next_order),
-                                cur + 1,
-                                binding_info,
-                                buf,
-                            );
+                            self.run_plan(plan, instr_order, cur + 1, binding_info, action_buf);
                         }
-                    },
-                );
+                    })
+                }
+            };
+        }
+        macro_rules! drain_updates_parallel {
+            ($updates:expr) => {{
+                drain_parallel(|| {
+                    let mut updates = mem::take(&mut $updates);
+                    let predicted = self.preds;
+                    let db = self.db;
+                    action_buf.recur(
+                        binding_info,
+                        instr_order,
+                        move || {
+                            ExecutionState::new(predicted, db.read_only_view(), Default::default())
+                        },
+                        move |binding_info, instr_order, buf| {
+                            for mut update in updates.drain(..) {
+                                for (var, val) in update.bindings.drain(..) {
+                                    binding_info.bindings.insert(var, val);
+                                }
+                                for (atom, subset) in update.refinements.drain(..) {
+                                    binding_info.insert_subset(atom, subset);
+                                }
+                                JoinState {
+                                    db,
+                                    preds: predicted,
+                                }
+                                .run_plan(
+                                    plan,
+                                    instr_order,
+                                    cur + 1,
+                                    binding_info,
+                                    buf,
+                                );
+                            }
+                        },
+                    );
+                })
             }};
         }
 
@@ -535,10 +535,10 @@ impl<'a> JoinState<'a> {
             table.refine(sub, constraints)
         }
 
-        match &plan.stages.instrs[instr_order[cur] as usize] {
+        match &plan.stages.instrs[instr_order.get(cur)] {
             JoinStage::Intersect { var, scans } => match scans.as_slice() {
                 [] => {}
-                [a] if a.cs.is_empty() => {
+                [a] if a.cs.is_empty() => intersect_a_empty(|| {
                     if binding_info.has_empty_subset(a.atom) {
                         return;
                     }
@@ -564,8 +564,8 @@ impl<'a> JoinState<'a> {
                     });
                     drain_updates!(updates);
                     binding_info.move_back(a.atom, prober);
-                }
-                [a] => {
+                }),
+                [a] => intersect_a(|| {
                     if binding_info.has_empty_subset(a.atom) {
                         return;
                     }
@@ -590,8 +590,8 @@ impl<'a> JoinState<'a> {
                     });
                     drain_updates!(updates);
                     binding_info.move_back(a.atom, prober);
-                }
-                [a, b] => {
+                }),
+                [a, b] => intersect_ab(|| {
                     let mut updates: Pooled<Vec<Pooled<FrameUpdate>>> = with_pool_set(PoolSet::get);
                     let a_prober = self.get_column_index(plan, binding_info, a.atom, a.column);
                     let b_prober = self.get_column_index(plan, binding_info, b.atom, b.column);
@@ -639,8 +639,8 @@ impl<'a> JoinState<'a> {
 
                     binding_info.move_back(a.atom, a_prober);
                     binding_info.move_back(b.atom, b_prober);
-                }
-                rest => {
+                }),
+                rest => intersect_rest(|| {
                     let mut updates: Pooled<Vec<Pooled<FrameUpdate>>> = with_pool_set(PoolSet::get);
                     let mut smallest = 0;
                     let mut smallest_size = usize::MAX;
@@ -702,13 +702,13 @@ impl<'a> JoinState<'a> {
                     for (spec, prober) in rest.iter().zip(probers.into_iter()) {
                         binding_info.move_back(spec.atom, prober);
                     }
-                }
+                }),
             },
             JoinStage::FusedIntersect {
                 cover,
                 bind,
                 to_intersect,
-            } if to_intersect.is_empty() => {
+            } if to_intersect.is_empty() => fused_empty(|| {
                 let cover_atom = cover.to_index.atom;
                 if binding_info.has_empty_subset(cover_atom) {
                     return;
@@ -754,12 +754,12 @@ impl<'a> JoinState<'a> {
                 drain_updates!(updates);
                 // Restore the subsets we swapped out.
                 binding_info.move_back_node(cover_atom, cover_node);
-            }
+            }),
             JoinStage::FusedIntersect {
                 cover,
                 bind,
                 to_intersect,
-            } => {
+            } => fused(|| {
                 let cover_atom = cover.to_index.atom;
                 if binding_info.has_empty_subset(cover_atom) {
                     return;
@@ -851,7 +851,7 @@ impl<'a> JoinState<'a> {
                 for (_, atom, prober) in index_probers {
                     binding_info.move_back(atom, prober);
                 }
-            }
+            }),
         }
     }
 }
@@ -914,14 +914,15 @@ trait ActionBuffer<'state>: Send {
     /// Execute `work`, potentially asynchronously, with a mutable reference to
     /// an action buffer, potentially handed off to a different thread.
     ///
-    /// Callers pass a clonable `Local` value that may be modified by work, or
+    /// Callers pass a clonable `LocalN` values that may be modified by work, or
     /// cloned first and then have a separate copy modified by `work`. Callers
     /// should assume that `local` _is_ modified synchronously.
-    fn recur<Local: Clone + Send + 'state>(
+    fn recur<Local1: Clone + Send + 'state, Local2: Clone + Send + 'state>(
         &mut self,
-        local: &mut Local,
+        local1: &mut Local1,
+        local2: &mut Local2,
         to_exec_state: impl FnMut() -> ExecutionState<'state> + Send + 'state,
-        work: impl for<'a> FnOnce(&mut Local, &mut Self::AsLocal<'a>) + Send + 'state,
+        work: impl for<'a> FnOnce(&mut Local1, &mut Local2, &mut Self::AsLocal<'a>) + Send + 'state,
     );
 
     /// The unit at which you should batch updates passed to calls to `recur`,
@@ -948,6 +949,7 @@ impl<'a, 'outer: 'a> ActionBuffer<'a> for InPlaceActionBuffer<'outer> {
     where
         'a: 'b;
 
+    #[inline(never)]
     fn push_bindings(
         &mut self,
         action: ActionId,
@@ -974,13 +976,14 @@ impl<'a, 'outer: 'a> ActionBuffer<'a> for InPlaceActionBuffer<'outer> {
             self.match_counter,
         );
     }
-    fn recur<Local: Clone + Send + 'a>(
+    fn recur<Local1: Clone + Send + 'a, Local2: Clone + Send + 'a>(
         &mut self,
-        local: &mut Local,
+        l1: &mut Local1,
+        l2: &mut Local2,
         _to_exec_state: impl FnMut() -> ExecutionState<'a> + Send + 'a,
-        work: impl for<'b> FnOnce(&mut Local, &mut Self) + Send + 'a,
+        work: impl for<'b> FnOnce(&mut Local1, &mut Local2, &mut Self) + Send + 'a,
     ) {
-        work(local, self);
+        work(l1, l2, self);
     }
 }
 
@@ -1045,15 +1048,19 @@ impl<'scope> ActionBuffer<'scope> for ScopedActionBuffer<'_, 'scope> {
         );
         self.needs_flush = false;
     }
-    fn recur<Local: Clone + Send + 'scope>(
+    fn recur<Local1: Clone + Send + 'scope, Local2: Clone + Send + 'scope>(
         &mut self,
-        local: &mut Local,
+        l1: &mut Local1,
+        l2: &mut Local2,
         mut to_exec_state: impl FnMut() -> ExecutionState<'scope> + Send + 'scope,
-        work: impl for<'a> FnOnce(&mut Local, &mut ScopedActionBuffer<'a, 'scope>) + Send + 'scope,
+        work: impl for<'a> FnOnce(&mut Local1, &mut Local2, &mut ScopedActionBuffer<'a, 'scope>)
+            + Send
+            + 'scope,
     ) {
         let rule_set = self.rule_set;
         let match_counter = self.match_counter;
-        let mut inner = local.clone();
+        let mut inner1 = l1.clone();
+        let mut inner2 = l2.clone();
         self.scope.spawn(move |scope| {
             let mut buf: ScopedActionBuffer<'_, 'scope> = ScopedActionBuffer {
                 scope,
@@ -1062,7 +1069,7 @@ impl<'scope> ActionBuffer<'scope> for ScopedActionBuffer<'_, 'scope> {
                 needs_flush: false,
                 batches: Default::default(),
             };
-            work(&mut inner, &mut buf);
+            work(&mut inner1, &mut inner2, &mut buf);
             if buf.needs_flush {
                 flush_action_states(
                     &mut to_exec_state(),
@@ -1143,6 +1150,57 @@ fn join_stage_order_key(join_stage: &JoinStage, binding_info: &BindingInfo) -> (
     }
 }
 
-fn sort_plan_by_size(order: &mut [u32], instrs: &[JoinStage], binding_info: &mut BindingInfo) {
-    order.sort_by_key(|index| join_stage_order_key(&instrs[*index as usize], binding_info));
+fn sort_plan_by_size(
+    order: &mut InstrOrder,
+    start: usize,
+    instrs: &[JoinStage],
+    binding_info: &mut BindingInfo,
+) {
+    order.data[start..]
+        .sort_by_key(|index| join_stage_order_key(&instrs[*index as usize], binding_info));
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InstrOrder {
+    data: SmallVec<[u16; 8]>,
+}
+
+impl InstrOrder {
+    fn new() -> Self {
+        InstrOrder {
+            data: SmallVec::new(),
+        }
+    }
+
+    fn from_iter(range: impl Iterator<Item = usize>) -> InstrOrder {
+        let mut res = InstrOrder::new();
+        res.data
+            .extend(range.map(|x| u16::try_from(x).expect("too many instructions")));
+        res
+    }
+
+    fn get(&self, idx: usize) -> usize {
+        self.data[idx] as usize
+    }
+    fn len(&self) -> usize {
+        self.data.len()
+    }
+}
+
+macro_rules! frame_func {
+    ($name:ident) => {
+        #[inline(never)]
+        fn $name<R>(f: impl FnOnce() -> R) -> R {
+            f()
+        }
+    };
+}
+frame_func!(intersect_a_empty);
+frame_func!(intersect_a);
+frame_func!(intersect_ab);
+frame_func!(intersect_rest);
+frame_func!(fused_empty);
+frame_func!(fused);
+frame_func!(drain_parallel);
+frame_func!(drain_reg);
+frame_func!(push_bindings);

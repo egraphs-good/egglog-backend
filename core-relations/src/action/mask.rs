@@ -63,6 +63,13 @@ impl Mask {
         self.data.union_with(&other.data);
     }
 
+    pub(crate) fn empty_iter(&mut self) -> MaskIterUnit {
+        MaskIterUnit {
+            counter: 0,
+            mask: &mut self.data,
+        }
+    }
+
     /// Iterate over the offsets in the slice that correspond to set offsets in
     /// the `Mask`.
     pub(crate) fn iter<'slice, T>(
@@ -253,6 +260,32 @@ where
                 ValueSource::Slice(x) => x[idx].clone(),
             }));
             IterResult::Item(result)
+        } else if idx < self.mask.len() {
+            IterResult::Skip
+        } else {
+            IterResult::Done
+        }
+    }
+    fn remove(&mut self, idx: usize) {
+        self.mask.set(idx, false);
+    }
+}
+
+pub(crate) struct MaskIterUnit<'mask> {
+    counter: usize,
+    mask: &'mask mut FixedBitSet,
+}
+
+impl<'mask> MaskIter for MaskIterUnit<'mask> {
+    type Item = ();
+    fn inc_counter(&mut self) -> usize {
+        let res = self.counter;
+        self.counter += 1;
+        res
+    }
+    fn get_at(&mut self, idx: usize) -> IterResult<()> {
+        if self.mask.contains(idx) {
+            IterResult::Item(())
         } else if idx < self.mask.len() {
             IterResult::Skip
         } else {

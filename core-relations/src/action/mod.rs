@@ -11,7 +11,7 @@ use smallvec::SmallVec;
 use crate::{
     common::{DashMap, Value},
     free_join::{CounterId, Counters, ExternalFunctions, TableId, TableInfo, Variable},
-    pool::{with_pool_set, Clear, PoolSet, Pooled},
+    pool::{with_pool_set, Clear, Pooled},
     table_spec::{ColumnId, MutationBuffer},
     BaseValues, ContainerValues, ExternalFunctionId, WrappedTable,
 };
@@ -22,7 +22,7 @@ pub(crate) mod mask;
 
 /// Threshold for choosing between vectorized and non-vectorized execution.
 /// When the number of bound variables is below this threshold, non-vectorized execution is used.
-const VECTORIZATION_THRESHOLD: usize = 8;
+const VECTORIZATION_THRESHOLD: usize = 4;
 
 #[cfg(test)]
 mod tests;
@@ -107,8 +107,8 @@ pub(crate) struct Bindings {
 }
 
 impl std::ops::Index<Variable> for Bindings {
-    type Output = Pooled<Vec<Value>>;
-    fn index(&self, var: Variable) -> &Pooled<Vec<Value>> {
+    type Output = [Value];
+    fn index(&self, var: Variable) -> &[Value] {
         &self.vars[var]
     }
 }
@@ -145,12 +145,11 @@ impl Bindings {
 
     pub(crate) fn push(&mut self, map: &DenseIdMap<Variable, Value>) {
         self.matches += 1;
-        with_pool_set(|ps| {
-            for (var, val) in map.iter() {
-                let vals = self.vars.get_or_insert(var, || ps.get());
-                vals.push(*val);
-            }
-        });
+        let pool = with_pool_set(|ps| ps.get_pool::<Vec<Value>>().clone());
+        for (var, val) in map.iter() {
+            let vals = self.vars.get_or_insert(var, || pool.get());
+            vals.push(*val);
+        }
         self.assert_invariant();
     }
 
@@ -394,24 +393,16 @@ impl ExecutionState<'_> {
             }
         } else {
             // Vectorized execution for larger batch sizes
-            with_pool_set(|ps| {
-                let mut mask = Mask::new(0..bindings.matches, ps);
-                for instr in instrs {
-                    if mask.is_empty() {
-                        break;
-                    }
-                    self.run_instr_vectorized(&mut mask, instr, bindings, ps);
+            let mut mask = with_pool_set(|ps| Mask::new(0..bindings.matches, ps));
+            for instr in instrs {
+                if mask.is_empty() {
+                    break;
                 }
-            })
+                self.run_instr_vectorized(&mut mask, instr, bindings);
+            }
         }
     }
-    fn run_instr_vectorized(
-        &mut self,
-        mask: &mut Mask,
-        inst: &Instr,
-        bindings: &mut Bindings,
-        pool_set: &PoolSet,
-    ) {
+    fn run_instr_vectorized(&mut self, mask: &mut Mask, inst: &Instr, bindings: &mut Bindings) {
         fn assert_impl(
             bindings: &mut Bindings,
             mask: &mut Mask,
@@ -473,7 +464,7 @@ impl ExecutionState<'_> {
                 dst_col,
                 dst_var,
             } => {
-                let pool = pool_set.get_pool::<Vec<Value>>().clone();
+                let pool = with_pool_set(|ps| ps.get_pool::<Vec<Value>>().clone());
                 self.buffers.get_or_insert(*table_id, || {
                     self.db.table_info[*table_id].table.new_buffer()
                 });
@@ -588,13 +579,13 @@ impl ExecutionState<'_> {
                 *mask = lookup_result;
             }
             Instr::Insert { table, vals } => {
-                let pool = pool_set.get_pool::<Vec<Value>>().clone();
+                let pool = with_pool_set(|ps| ps.get_pool::<Vec<Value>>().clone());
                 iter_entries!(pool, vals).for_each(|vals| {
                     self.stage_insert(*table, &vals);
                 })
             }
             Instr::InsertIfEq { table, l, r, vals } => {
-                let pool = pool_set.get_pool::<Vec<Value>>().clone();
+                let pool = with_pool_set(|ps| ps.get_pool::<Vec<Value>>().clone());
                 match (l, r) {
                     (QueryEntry::Var(v1), QueryEntry::Var(v2)) => iter_entries!(pool, vals)
                         .zip(&bindings[*v1])
@@ -622,7 +613,7 @@ impl ExecutionState<'_> {
                 }
             }
             Instr::Remove { table, args } => {
-                let pool = pool_set.get_pool::<Vec<Value>>().clone();
+                let pool = with_pool_set(|ps| ps.get_pool::<Vec<Value>>().clone());
                 iter_entries!(pool, args).for_each(|args| {
                     self.stage_remove(*table, &args);
                 })
@@ -663,7 +654,7 @@ impl ExecutionState<'_> {
                 *mask = f1_result;
             }
             Instr::AssertAnyNe { ops, divider } => {
-                let pool = pool_set.get_pool::<Vec<Value>>().clone();
+                let pool = with_pool_set(|ps| ps.get_pool::<Vec<Value>>().clone());
                 iter_entries!(pool, ops).retain(|vals| {
                     vals[0..*divider]
                         .iter()
@@ -674,7 +665,7 @@ impl ExecutionState<'_> {
             Instr::AssertEq(l, r) => assert_impl(bindings, mask, l, r, |l, r| l == r),
             Instr::AssertNe(l, r) => assert_impl(bindings, mask, l, r, |l, r| l != r),
             Instr::ReadCounter { counter, dst } => {
-                let mut vals = pool_set.get::<Vec<Value>>();
+                let mut vals = with_pool_set(|ps| ps.get::<Vec<Value>>());
                 let ctr_val = Value::from_usize(self.read_counter(*counter));
                 vals.resize(bindings.matches, ctr_val);
                 bindings.insert(*dst, vals);
