@@ -10,7 +10,10 @@ use smallvec::SmallVec;
 
 use crate::{
     common::{DashMap, Value},
-    free_join::{CounterId, Counters, ExternalFunctions, TableId, TableInfo, Variable},
+    free_join::{
+        execute::{push_existing, push_new},
+        CounterId, Counters, ExternalFunctions, TableId, TableInfo, Variable,
+    },
     pool::{with_pool_set, Clear, Pooled},
     table_spec::{ColumnId, MutationBuffer},
     BaseValues, ContainerValues, ExternalFunctionId, WrappedTable,
@@ -99,26 +102,44 @@ impl From<Value> for MergeVal {
 ///
 /// The intent of bindings is to store a sequence of mappings from [`Variable`] to [`Value`], in a
 /// struct-of-arrays style that is better laid out for processing bindings in batches.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct Bindings {
     // INVARIANT: self.vars.iter().map(|(_, v)| v.len() == self.matches)
     matches: usize,
-    vars: DenseIdMap<Variable, Pooled<Vec<Value>>>,
+    max_batch_size: usize,
+    data: Pooled<Vec<Value>>,
+    /// Points into `data`. data[vars[var].. vars[var]+matches]` contains the values for `data`.
+    vars: DenseIdMap<Variable, usize>,
 }
 
 impl std::ops::Index<Variable> for Bindings {
     type Output = [Value];
     fn index(&self, var: Variable) -> &[Value] {
-        &self.vars[var]
+        self.get(var).unwrap()
     }
 }
 
 impl Bindings {
+    pub(crate) fn new(max_batch_size: usize) -> Self {
+        Bindings {
+            matches: 0,
+            max_batch_size,
+            data: Default::default(),
+            vars: DenseIdMap::new(),
+        }
+    }
     fn assert_invariant(&self) {
         #[cfg(debug_assertions)]
         {
-            for (_, v) in self.vars.iter() {
-                assert_eq!(v.len(), self.matches);
+            assert!(self.matches <= self.max_batch_size);
+            for (var, start) in self.vars.iter() {
+                assert!(
+                    start + self.matches <= self.data.len(),
+                    "Variable {:?} starts at {}, but data only has {} elements",
+                    var,
+                    start,
+                    self.data.len()
+                );
             }
         }
     }
@@ -126,36 +147,99 @@ impl Bindings {
     pub(crate) fn clear(&mut self) {
         self.matches = 0;
         self.vars.clear();
+        self.data.clear();
         self.assert_invariant();
     }
 
-    fn get(&self, var: Variable) -> Option<&Pooled<Vec<Value>>> {
-        self.vars.get(var)
+    fn get(&self, var: Variable) -> Option<&[Value]> {
+        let start = self.vars.get(var)?;
+        Some(&self.data[*start..*start + self.matches])
     }
 
-    pub(crate) fn insert(&mut self, var: Variable, vals: Pooled<Vec<Value>>) {
+    fn add_mapping(&mut self, var: Variable, vals: &[Value]) {
+        let start = self.data.len();
+        self.data.extend_from_slice(vals);
+        if vals.len() < self.max_batch_size {
+            let target_len = self.data.len() + self.max_batch_size - vals.len();
+            self.data.resize(target_len, Value::stale());
+        }
+        self.vars.insert(var, start);
+    }
+
+    pub(crate) fn insert(&mut self, var: Variable, vals: &[Value]) {
         if self.vars.n_ids() == 0 {
             self.matches = vals.len();
         } else {
             assert_eq!(self.matches, vals.len());
         }
-        self.vars.insert(var, vals);
+        self.add_mapping(var, vals);
         self.assert_invariant();
     }
 
     pub(crate) fn push(&mut self, map: &DenseIdMap<Variable, Value>) {
-        self.matches += 1;
-        let pool = with_pool_set(|ps| ps.get_pool::<Vec<Value>>().clone());
-        for (var, val) in map.iter() {
-            let vals = self.vars.get_or_insert(var, || pool.get());
-            vals.push(*val);
+        if self.matches != 0 {
+            push_existing(|| {
+                assert!(self.matches < self.max_batch_size);
+                for (var, val) in map.iter() {
+                    let existing = self.vars.get(var).unwrap();
+                    // SAFETY: we are guaranteed to be in bounds due to the above asssertion.
+                    unsafe {
+                        *self.data.get_unchecked_mut(*existing + self.matches) = *val;
+                    }
+                }
+            })
+        } else {
+            push_new(|| {
+                for (var, val) in map.iter() {
+                    self.add_mapping(var, &[*val]);
+                }
+            })
         }
+
+        self.matches += 1;
         self.assert_invariant();
     }
 
-    pub(crate) fn take(&mut self, var: Variable) -> Option<Pooled<Vec<Value>>> {
-        self.vars.take(var)
+    /// A method that removes the bindings for the given variable and allows for its values to be
+    /// used independently from the [`Bindings`] struct. This is helpful when an operation needs to
+    /// mutably borrow the values for one value while reading the values for another.
+    ///
+    /// To add the values back, use [`Bindings::replace`].
+    pub(crate) fn take(&mut self, var: Variable) -> Option<ExtractedBinding> {
+        let mut vals: Pooled<Vec<Value>> = with_pool_set(|ps| ps.get());
+        vals.extend_from_slice(self.get(var)?);
+        let start = self.vars.take(var)?;
+        Some(ExtractedBinding {
+            var,
+            offset: start,
+            vals,
+        })
     }
+
+    /// Replace a binding extracted with [`Bindings::take`].
+    ///
+    /// # Panics
+    /// This method will panic if the length of the values in `bdg` does not match the current
+    /// number of matches in `Bindings`. It may panic if `bdg` was extracted from a different
+    /// [`Bindings`] than the one it is being replaced in.
+    pub(crate) fn replace(&mut self, bdg: ExtractedBinding) {
+        // Replace the binding with the new values.
+        let ExtractedBinding {
+            var,
+            offset,
+            mut vals,
+        } = bdg;
+        assert_eq!(vals.len(), self.matches);
+        self.data
+            .splice(offset..offset + self.matches, vals.drain(..));
+        self.vars.insert(var, offset);
+    }
+}
+
+pub(crate) struct ExtractedBinding {
+    var: Variable,
+    offset: usize,
+    pub(crate) vals: Pooled<Vec<Value>>,
 }
 
 #[derive(Default)]
@@ -371,6 +455,7 @@ impl ExecutionState<'_> {
 
         // Choose execution strategy based on number of bindings
         if bindings.matches < VECTORIZATION_THRESHOLD {
+            let todo_remove_nonvectorized = 1;
             // Non-vectorized execution for small batch sizes. This avoids the need for a large
             // number of temporary vectors and masks.
             let mut scratch = with_pool_set(|ps| ps.get::<Vec<Value>>());
@@ -379,9 +464,9 @@ impl ExecutionState<'_> {
             for binding_idx in 0..bindings.matches {
                 single_bindings.clear();
                 // Extract bindings for this row
-                for (var, vals) in bindings.vars.iter() {
-                    if binding_idx < vals.len() {
-                        single_bindings.insert(var, vals[binding_idx]);
+                for (var, _) in bindings.vars.iter() {
+                    if binding_idx < bindings.matches {
+                        single_bindings.insert(var, bindings[var][binding_idx]);
                     }
                 }
 
@@ -478,7 +563,7 @@ impl ExecutionState<'_> {
                     return;
                 }
                 let mut out = bindings.take(*dst_var).unwrap();
-                iter_entries!(mask_copy, pool, args).assign_vec(&mut out, |offset, key| {
+                iter_entries!(mask_copy, pool, args).assign_vec(&mut out.vals, |offset, key| {
                     // First, check if the entry is already in the table:
                     // if let Some(row) = table.get_row_column(&key, *dst_col) {
                     //     return row;
@@ -518,7 +603,7 @@ impl ExecutionState<'_> {
                         });
                     row[dst_col.index()]
                 });
-                bindings.insert(*dst_var, out);
+                bindings.replace(out);
             }
             Instr::LookupWithDefault {
                 table,
@@ -668,7 +753,7 @@ impl ExecutionState<'_> {
                 let mut vals = with_pool_set(|ps| ps.get::<Vec<Value>>());
                 let ctr_val = Value::from_usize(self.read_counter(*counter));
                 vals.resize(bindings.matches, ctr_val);
-                bindings.insert(*dst, vals);
+                bindings.insert(*dst, &vals);
             }
         }
     }

@@ -494,7 +494,7 @@ impl<T: Table> TableWrapper for WrapperImpl<T> {
                 });
             }
         };
-        bindings.insert(out_var, out);
+        bindings.insert(out_var, &out);
     }
 
     fn lookup_with_default_vectorized(
@@ -554,7 +554,7 @@ impl<T: Table> TableWrapper for WrapperImpl<T> {
                 })
             }
         };
-        bindings.insert(out_var, out);
+        bindings.insert(out_var, &out);
     }
 }
 

@@ -239,11 +239,20 @@ impl Database {
     }
 }
 
-#[derive(Default)]
 struct ActionState {
     n_runs: usize,
     len: usize,
     bindings: Bindings,
+}
+
+impl Default for ActionState {
+    fn default() -> Self {
+        Self {
+            n_runs: 0,
+            len: 0,
+            bindings: Bindings::new(VAR_BATCH_SIZE),
+        }
+    }
 }
 
 struct JoinState<'a> {
@@ -960,7 +969,7 @@ impl<'a, 'outer: 'a> ActionBuffer<'a> for InPlaceActionBuffer<'outer> {
         action_state.n_runs += 1;
         action_state.len += 1;
         action_state.bindings.push(bindings);
-        if action_state.len > VAR_BATCH_SIZE {
+        if action_state.len >= VAR_BATCH_SIZE {
             let mut state = to_exec_state();
             state.run_instrs(&self.rule_set.actions[action], &mut action_state.bindings);
             action_state.bindings.clear();
@@ -1028,9 +1037,10 @@ impl<'scope> ActionBuffer<'scope> for ScopedActionBuffer<'_, 'scope> {
         action_state.n_runs += 1;
         action_state.len += 1;
         action_state.bindings.push(bindings);
-        if action_state.len > VAR_BATCH_SIZE {
+        if action_state.len >= VAR_BATCH_SIZE {
             let mut state = to_exec_state();
-            let mut bindings = mem::take(&mut action_state.bindings);
+            let mut bindings =
+                mem::replace(&mut action_state.bindings, Bindings::new(VAR_BATCH_SIZE));
             action_state.len = 0;
             let rule_set = self.rule_set;
             self.scope.spawn(move |_| {
@@ -1190,7 +1200,7 @@ impl InstrOrder {
 macro_rules! frame_func {
     ($name:ident) => {
         #[inline(never)]
-        fn $name<R>(f: impl FnOnce() -> R) -> R {
+        pub(crate) fn $name<R>(f: impl FnOnce() -> R) -> R {
             f()
         }
     };
@@ -1204,3 +1214,5 @@ frame_func!(fused);
 frame_func!(drain_parallel);
 frame_func!(drain_reg);
 frame_func!(push_bindings);
+frame_func!(push_existing);
+frame_func!(push_new);

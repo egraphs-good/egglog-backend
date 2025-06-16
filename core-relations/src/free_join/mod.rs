@@ -247,7 +247,7 @@ pub(crate) trait ExternalFunctionExt: ExternalFunction {
                 )
                 .fill_vec(&mut out, Value::stale, |_, args| self.invoke(state, &args)),
         }
-        bindings.insert(out_var, out);
+        bindings.insert(out_var, &out);
     }
 
     /// A variant of [`ExternalFunctionExt::invoke_batch`] that overwrites the output variable,
@@ -265,9 +265,7 @@ pub(crate) trait ExternalFunctionExt: ExternalFunction {
         out_var: Variable,
     ) {
         let pool: Pool<Vec<Value>> = with_pool_set(|ps| ps.get_pool().clone());
-        let mut out = bindings
-            .take(out_var)
-            .expect("output variable must be bound");
+        let mut out = bindings.take(out_var).expect("out_var must be bound");
         mask.iter_dynamic(
             pool,
             args.iter().map(|v| match v {
@@ -275,8 +273,8 @@ pub(crate) trait ExternalFunctionExt: ExternalFunction {
                 QueryEntry::Const(c) => ValueSource::Const(*c),
             }),
         )
-        .assign_vec_and_retain(&mut out, |_, args| self.invoke(state, &args));
-        bindings.insert(out_var, out);
+        .assign_vec_and_retain(&mut out.vals, |_, args| self.invoke(state, &args));
+        bindings.replace(out);
     }
 }
 
