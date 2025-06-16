@@ -579,10 +579,10 @@ impl<'a> JoinState<'a> {
                                 return;
                             }
                             updates.refine_atom(a.atom, sub);
+                            updates.new_frame();
                             if updates.frames() >= chunk_size {
                                 drain_updates!(updates);
                             }
-                            updates.new_frame();
                         })
                     });
                     drain_updates!(updates);
@@ -604,10 +604,10 @@ impl<'a> JoinState<'a> {
                                 return;
                             }
                             updates.refine_atom(a.atom, sub);
+                            updates.new_frame();
                             if updates.frames() >= chunk_size {
                                 drain_updates!(updates);
                             }
-                            updates.new_frame();
                         })
                     });
                     drain_updates!(updates);
