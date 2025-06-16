@@ -151,6 +151,11 @@ impl<K: NumericId, V> DenseIdMap<K, V> {
         self.data[key.index()].get_or_insert_with(f)
     }
 
+    pub fn raw(&self) -> &[Option<V>] {
+        let todo_resolve = 1;
+        &self.data
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = (K, &V)> {
         self.data
             .iter()

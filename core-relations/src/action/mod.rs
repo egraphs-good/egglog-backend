@@ -94,65 +94,6 @@ impl From<Value> for MergeVal {
     }
 }
 
-#[derive(Default)]
-pub(crate) struct BufferedBindings {
-    matches: usize,
-    data: Vec<(Variable, Value)>,
-}
-
-const SPACER: Variable = Variable::new_const(!0);
-
-impl BufferedBindings {
-    pub(crate) fn new() -> Self {
-        BufferedBindings {
-            matches: 0,
-            data: Vec::new(),
-        }
-    }
-
-    pub(crate) fn clear(&mut self) {
-        self.matches = 0;
-        self.data.clear();
-    }
-
-    pub(crate) fn push(&mut self, bindings: &DenseIdMap<Variable, Value>) {
-        for (var, val) in bindings.iter() {
-            self.data.push((var, *val));
-        }
-        self.data.push((SPACER, Value::stale()));
-        self.matches += 1;
-    }
-    pub(crate) fn flush(&mut self) -> Bindings {
-        let mut res = Bindings::new(self.matches);
-        let mut match_index = 0;
-        let mut iter = self.data.drain(..);
-        for (var, val) in iter.by_ref() {
-            if var != SPACER {
-                res.add_mapping(var, &[val]);
-            } else {
-                match_index += 1;
-                break;
-            }
-        }
-        for (var, val) in iter {
-            if var != SPACER {
-                // SAFETY: we are guaranteed that the variable exists in the Bindings and we
-                // have sufficient space allocated thanks `match_index` being maintained
-                // correctly.
-                unsafe {
-                    *res.data
-                        .get_unchecked_mut(*res.vars.get(var).unwrap() + match_index) = val;
-                }
-            } else {
-                match_index += 1;
-            }
-        }
-        res.matches = match_index;
-        self.matches = 0;
-        res
-    }
-}
-
 /// Bindings store a sequence of values for a given set of variables.
 ///
 /// The intent of bindings is to store a sequence of mappings from [`Variable`] to [`Value`], in a
@@ -233,13 +174,20 @@ impl Bindings {
 
     pub(crate) fn push(&mut self, map: &DenseIdMap<Variable, Value>) {
         if self.matches != 0 {
+            let todo_resolve_safety_issues = 1;
             push_existing(|| {
                 assert!(self.matches < self.max_batch_size);
-                for (var, val) in map.iter() {
-                    let existing = self.vars.get(var).unwrap();
+                for (i, val) in map.raw().iter().copied().enumerate() {
+                    let is_some = val.is_some();
+                    let val = val.unwrap_or(Value::stale());
+                    let existing = if is_some {
+                        unsafe { self.vars.raw().get_unchecked(i).unwrap_unchecked() }
+                    } else {
+                        0
+                    };
                     // SAFETY: we are guaranteed to be in bounds due to the above asssertion.
-                    unsafe {
-                        *self.data.get_unchecked_mut(*existing + self.matches) = *val;
+                    if is_some {
+                        *unsafe { self.data.get_unchecked_mut(existing + self.matches) } = val;
                     }
                 }
             })

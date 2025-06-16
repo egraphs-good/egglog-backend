@@ -10,7 +10,7 @@ use smallvec::SmallVec;
 use web_time::Instant;
 
 use crate::{
-    action::{Bindings, BufferedBindings, ExecutionState, PredictedVals},
+    action::{Bindings, ExecutionState, PredictedVals},
     common::{DashMap, Value},
     free_join::{
         frame_update::{FrameUpdates, UpdateInstr},
