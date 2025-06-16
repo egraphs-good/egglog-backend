@@ -10,7 +10,7 @@ use smallvec::SmallVec;
 use web_time::Instant;
 
 use crate::{
-    action::{Bindings, ExecutionState, PredictedVals},
+    action::{Bindings, BufferedBindings, ExecutionState, PredictedVals},
     common::{DashMap, Value},
     free_join::{
         frame_update::{FrameUpdates, UpdateInstr},
@@ -579,7 +579,7 @@ impl<'a> JoinState<'a> {
                                 return;
                             }
                             updates.refine_atom(a.atom, sub);
-                            updates.new_frame();
+                            updates.finish_frame();
                             if updates.frames() >= chunk_size {
                                 drain_updates!(updates);
                             }
@@ -604,7 +604,7 @@ impl<'a> JoinState<'a> {
                                 return;
                             }
                             updates.refine_atom(a.atom, sub);
-                            updates.new_frame();
+                            updates.finish_frame();
                             if updates.frames() >= chunk_size {
                                 drain_updates!(updates);
                             }
@@ -651,7 +651,7 @@ impl<'a> JoinState<'a> {
                                 updates.push_binding(*var, val[0]);
                                 updates.refine_atom(smaller_atom, small_sub);
                                 updates.refine_atom(larger_atom, large_sub);
-                                updates.new_frame();
+                                updates.finish_frame();
                                 if updates.frames() >= chunk_size {
                                     drain_updates_parallel!(updates);
                                 }
@@ -717,7 +717,7 @@ impl<'a> JoinState<'a> {
                                     return;
                                 }
                                 updates.refine_atom(main_spec.atom, sub);
-                                updates.new_frame();
+                                updates.finish_frame();
                                 if updates.frames() >= chunk_size {
                                     drain_updates_parallel!(updates);
                                 }
@@ -765,7 +765,7 @@ impl<'a> JoinState<'a> {
                         for (i, (_, var)) in bind.iter().enumerate() {
                             updates.push_binding(*var, key[i]);
                         }
-                        updates.new_frame();
+                        updates.finish_frame();
                         if updates.frames() >= chunk_size {
                             drain_updates_parallel!(updates);
                         }
@@ -855,7 +855,7 @@ impl<'a> JoinState<'a> {
                             }
                             updates.refine_atom(*atom, subset);
                         }
-                        updates.new_frame();
+                        updates.finish_frame();
                         if updates.frames() >= chunk_size {
                             drain_updates_parallel!(updates);
                         }
@@ -927,7 +927,7 @@ trait ActionBuffer<'state>: Send {
     /// As of right now this is just a hard-coded value. We may change it in the
     /// future to fan out more at higher levels though.
     fn morsel_size(&mut self, _level: usize, _total: usize) -> usize {
-        1024
+        256
     }
 }
 

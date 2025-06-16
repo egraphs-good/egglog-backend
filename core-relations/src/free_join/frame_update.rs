@@ -18,9 +18,11 @@ enum UpdateCell {
 pub(super) enum UpdateInstr {
     PushBinding(Variable, Value),
     RefineAtom(AtomId, Subset),
+    /// Marks the end of the current frame. Time to make a recursive call.
     EndFrame,
 }
 
+/// A flat buffer of updates that is used to prepare a sequence of recursive calls to free join.
 #[derive(Default)]
 pub(super) struct FrameUpdates {
     subsets: DenseIdMap<SubsetId, Subset>,
@@ -39,25 +41,31 @@ impl FrameUpdates {
         }
     }
 
+    /// Bind `var` to `val` in the current frame.
     pub(super) fn push_binding(&mut self, var: Variable, val: Value) {
         self.updates.push(UpdateCell::PushBinding(var, val));
     }
 
+    /// Refine `atom` to consider only the given `subset` in the current frame.
     pub(super) fn refine_atom(&mut self, atom: AtomId, subset: Subset) {
         let subset = self.subsets.push(subset);
         self.updates.push(UpdateCell::RefineAtom(atom, subset));
     }
 
+    /// Roll back the updates to the last frame start. Note that repeated calls
+    /// to this method will still only roll back one frame (total).
     pub(super) fn rollback(&mut self) {
         self.updates.truncate(self.last_start);
     }
 
-    pub(super) fn new_frame(&mut self) {
+    /// Finish the current frame and prepare for the next one.
+    pub(super) fn finish_frame(&mut self) {
         self.updates.push(UpdateCell::EndFrame);
         self.last_start = self.updates.len();
         self.frames += 1;
     }
 
+    /// Get the number of frames that have been finished.
     pub(super) fn frames(&self) -> usize {
         self.frames
     }

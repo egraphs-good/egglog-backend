@@ -94,6 +94,65 @@ impl From<Value> for MergeVal {
     }
 }
 
+#[derive(Default)]
+pub(crate) struct BufferedBindings {
+    matches: usize,
+    data: Vec<(Variable, Value)>,
+}
+
+const SPACER: Variable = Variable::new_const(!0);
+
+impl BufferedBindings {
+    pub(crate) fn new() -> Self {
+        BufferedBindings {
+            matches: 0,
+            data: Vec::new(),
+        }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.matches = 0;
+        self.data.clear();
+    }
+
+    pub(crate) fn push(&mut self, bindings: &DenseIdMap<Variable, Value>) {
+        for (var, val) in bindings.iter() {
+            self.data.push((var, *val));
+        }
+        self.data.push((SPACER, Value::stale()));
+        self.matches += 1;
+    }
+    pub(crate) fn flush(&mut self) -> Bindings {
+        let mut res = Bindings::new(self.matches);
+        let mut match_index = 0;
+        let mut iter = self.data.drain(..);
+        for (var, val) in iter.by_ref() {
+            if var != SPACER {
+                res.add_mapping(var, &[val]);
+            } else {
+                match_index += 1;
+                break;
+            }
+        }
+        for (var, val) in iter {
+            if var != SPACER {
+                // SAFETY: we are guaranteed that the variable exists in the Bindings and we
+                // have sufficient space allocated thanks `match_index` being maintained
+                // correctly.
+                unsafe {
+                    *res.data
+                        .get_unchecked_mut(*res.vars.get(var).unwrap() + match_index) = val;
+                }
+            } else {
+                match_index += 1;
+            }
+        }
+        res.matches = match_index;
+        self.matches = 0;
+        res
+    }
+}
+
 /// Bindings store a sequence of values for a given set of variables.
 ///
 /// The intent of bindings is to store a sequence of mappings from [`Variable`] to [`Value`], in a
