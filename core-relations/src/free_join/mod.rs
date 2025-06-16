@@ -35,6 +35,7 @@ use self::plan::Plan;
 use crate::action::{ExecutionState, PredictedVals};
 
 pub(crate) mod execute;
+pub(crate) mod frame_update;
 pub(crate) mod plan;
 
 define_id!(
