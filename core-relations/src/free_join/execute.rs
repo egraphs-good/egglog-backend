@@ -465,7 +465,6 @@ impl<'a> JoinState<'a> {
     ) where
         'a: 'buf,
     {
-        let remove_all_inline_never = 1;
         if cur >= instr_order.len() {
             action_buf.push_bindings(plan.stages.actions, &binding_info.bindings, || {
                 ExecutionState::new(self.preds, self.db.read_only_view(), Default::default())
