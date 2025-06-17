@@ -194,61 +194,11 @@ pub(crate) trait ExternalFunctionExt: ExternalFunction {
         let pool: Pool<Vec<Value>> = with_pool_set(|ps| ps.get_pool().clone());
         let mut out = pool.get();
         out.reserve(mask.len());
-
-        match args {
-            [] => {
-                mask.empty_iter()
-                    .fill_vec(&mut out, Value::stale, |_, _| self.invoke(state, &[]));
-            }
-            [QueryEntry::Var(v)] => {
-                mask.iter(&bindings[*v])
-                    .fill_vec(&mut out, Value::stale, |_, arg| {
-                        self.invoke(state, std::slice::from_ref(arg))
-                    });
-            }
-            [QueryEntry::Const(c)] => {
-                mask.empty_iter().fill_vec(&mut out, Value::stale, |_, _| {
-                    self.invoke(state, std::slice::from_ref(c))
-                });
-            }
-            [QueryEntry::Var(v1), QueryEntry::Var(v2)] => {
-                mask.iter(&bindings[*v1]).zip(&bindings[*v2]).fill_vec(
-                    &mut out,
-                    Value::stale,
-                    |_, (v1, v2)| self.invoke(state, &[*v1, *v2]),
-                );
-            }
-            [QueryEntry::Const(c1), QueryEntry::Const(c2)] => {
-                mask.empty_iter().fill_vec(&mut out, Value::stale, |_, _| {
-                    self.invoke(state, &[*c1, *c2])
-                });
-            }
-            [QueryEntry::Var(v), QueryEntry::Const(c)] => {
-                mask.iter(&bindings[*v])
-                    .fill_vec(&mut out, Value::stale, |_, v| self.invoke(state, &[*v, *c]));
-            }
-            [QueryEntry::Const(c), QueryEntry::Var(v)] => {
-                mask.iter(&bindings[*v])
-                    .fill_vec(&mut out, Value::stale, |_, v| self.invoke(state, &[*c, *v]));
-            }
-            [QueryEntry::Var(v1), QueryEntry::Var(v2), QueryEntry::Var(v3)] => {
-                mask.iter(&bindings[*v1])
-                    .zip(&bindings[*v2])
-                    .zip(&bindings[*v3])
-                    .fill_vec(&mut out, Value::stale, |_, ((v1, v2), v3)| {
-                        self.invoke(state, &[*v1, *v2, *v3])
-                    });
-            }
-            _ => mask
-                .iter_dynamic(
-                    pool,
-                    args.iter().map(|v| match v {
-                        QueryEntry::Var(v) => ValueSource::Slice(&bindings[*v]),
-                        QueryEntry::Const(c) => ValueSource::Const(*c),
-                    }),
-                )
-                .fill_vec(&mut out, Value::stale, |_, args| self.invoke(state, &args)),
-        }
+        process_vec!(mask, args, bindings, |iter| {
+            iter.fill_vec(&mut out, Value::stale, |_, args| {
+                self.invoke(state, args.as_slice())
+            });
+        });
         bindings.insert(out_var, &out);
     }
 
@@ -266,16 +216,10 @@ pub(crate) trait ExternalFunctionExt: ExternalFunction {
         args: &[QueryEntry],
         out_var: Variable,
     ) {
-        let pool: Pool<Vec<Value>> = with_pool_set(|ps| ps.get_pool().clone());
         let mut out = bindings.take(out_var).expect("out_var must be bound");
-        mask.iter_dynamic(
-            pool,
-            args.iter().map(|v| match v {
-                QueryEntry::Var(v) => ValueSource::Slice(&bindings[*v]),
-                QueryEntry::Const(c) => ValueSource::Const(*c),
-            }),
-        )
-        .assign_vec_and_retain(&mut out.vals, |_, args| self.invoke(state, &args));
+        process_vec!(mask, args, bindings, |iter| {
+            iter.assign_vec_and_retain(&mut out.vals, |_, args| self.invoke(state, &args))
+        });
         bindings.replace(out);
     }
 }
