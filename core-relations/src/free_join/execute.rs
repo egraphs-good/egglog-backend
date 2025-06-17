@@ -467,10 +467,8 @@ impl<'a> JoinState<'a> {
     {
         let remove_all_inline_never = 1;
         if cur >= instr_order.len() {
-            push_bindings(|| {
-                action_buf.push_bindings(plan.stages.actions, &binding_info.bindings, || {
-                    ExecutionState::new(self.preds, self.db.read_only_view(), Default::default())
-                });
+            action_buf.push_bindings(plan.stages.actions, &binding_info.bindings, || {
+                ExecutionState::new(self.preds, self.db.read_only_view(), Default::default())
             });
             return;
         }
@@ -487,8 +485,38 @@ impl<'a> JoinState<'a> {
                 if cur == 0 || cur == 1 {
                     drain_updates_parallel!($updates)
                 } else {
-                    drain_reg(|| {
-                        $updates.drain(|update| match update {
+                    $updates.drain(|update| match update {
+                        UpdateInstr::PushBinding(var, val) => {
+                            binding_info.bindings.insert(var, val);
+                        }
+                        UpdateInstr::RefineAtom(atom, subset) => {
+                            binding_info.insert_subset(atom, subset);
+                        }
+                        UpdateInstr::EndFrame => {
+                            self.run_plan(plan, instr_order, cur + 1, binding_info, action_buf);
+                        }
+                    })
+                }
+            };
+        }
+        macro_rules! drain_updates_parallel {
+            ($updates:expr) => {{
+                let predicted = self.preds;
+                let db = self.db;
+                action_buf.recur(
+                    BorrowedLocalState {
+                        binding_info,
+                        instr_order,
+                        updates: &mut $updates,
+                    },
+                    move || ExecutionState::new(predicted, db.read_only_view(), Default::default()),
+                    move |BorrowedLocalState {
+                              binding_info,
+                              instr_order,
+                              updates,
+                          },
+                          buf| {
+                        updates.drain(|update| match update {
                             UpdateInstr::PushBinding(var, val) => {
                                 binding_info.bindings.insert(var, val);
                             }
@@ -496,58 +524,22 @@ impl<'a> JoinState<'a> {
                                 binding_info.insert_subset(atom, subset);
                             }
                             UpdateInstr::EndFrame => {
-                                self.run_plan(plan, instr_order, cur + 1, binding_info, action_buf);
+                                JoinState {
+                                    db,
+                                    preds: predicted,
+                                }
+                                .run_plan(
+                                    plan,
+                                    instr_order,
+                                    cur + 1,
+                                    binding_info,
+                                    buf,
+                                );
                             }
                         })
-                    })
-                }
-            };
-        }
-        macro_rules! drain_updates_parallel {
-            ($updates:expr) => {{
-                drain_parallel(|| {
-                    let predicted = self.preds;
-                    let db = self.db;
-                    action_buf.recur(
-                        BorrowedLocalState {
-                            binding_info,
-                            instr_order,
-                            updates: &mut $updates,
-                        },
-                        move || {
-                            ExecutionState::new(predicted, db.read_only_view(), Default::default())
-                        },
-                        move |BorrowedLocalState {
-                                  binding_info,
-                                  instr_order,
-                                  updates,
-                              },
-                              buf| {
-                            updates.drain(|update| match update {
-                                UpdateInstr::PushBinding(var, val) => {
-                                    binding_info.bindings.insert(var, val);
-                                }
-                                UpdateInstr::RefineAtom(atom, subset) => {
-                                    binding_info.insert_subset(atom, subset);
-                                }
-                                UpdateInstr::EndFrame => {
-                                    JoinState {
-                                        db,
-                                        preds: predicted,
-                                    }
-                                    .run_plan(
-                                        plan,
-                                        instr_order,
-                                        cur + 1,
-                                        binding_info,
-                                        buf,
-                                    );
-                                }
-                            })
-                        },
-                    );
-                    $updates.clear();
-                })
+                    },
+                );
+                $updates.clear();
             }};
         }
 
@@ -563,7 +555,7 @@ impl<'a> JoinState<'a> {
         match &plan.stages.instrs[instr_order.get(cur)] {
             JoinStage::Intersect { var, scans } => match scans.as_slice() {
                 [] => {}
-                [a] if a.cs.is_empty() => intersect_a_empty(|| {
+                [a] if a.cs.is_empty() => {
                     if binding_info.has_empty_subset(a.atom) {
                         return;
                     }
@@ -587,8 +579,8 @@ impl<'a> JoinState<'a> {
                     });
                     drain_updates!(updates);
                     binding_info.move_back(a.atom, prober);
-                }),
-                [a] => intersect_a(|| {
+                }
+                [a] => {
                     if binding_info.has_empty_subset(a.atom) {
                         return;
                     }
@@ -612,8 +604,8 @@ impl<'a> JoinState<'a> {
                     });
                     drain_updates!(updates);
                     binding_info.move_back(a.atom, prober);
-                }),
-                [a, b] => intersect_ab(|| {
+                }
+                [a, b] => {
                     let a_prober = self.get_column_index(plan, binding_info, a.atom, a.column);
                     let b_prober = self.get_column_index(plan, binding_info, b.atom, b.column);
 
@@ -662,8 +654,8 @@ impl<'a> JoinState<'a> {
 
                     binding_info.move_back(a.atom, a_prober);
                     binding_info.move_back(b.atom, b_prober);
-                }),
-                rest => intersect_rest(|| {
+                }
+                rest => {
                     let mut smallest = 0;
                     let mut smallest_size = usize::MAX;
                     let mut probers = Vec::with_capacity(rest.len());
@@ -728,13 +720,13 @@ impl<'a> JoinState<'a> {
                     for (spec, prober) in rest.iter().zip(probers.into_iter()) {
                         binding_info.move_back(spec.atom, prober);
                     }
-                }),
+                }
             },
             JoinStage::FusedIntersect {
                 cover,
                 bind,
                 to_intersect,
-            } if to_intersect.is_empty() => fused_empty(|| {
+            } if to_intersect.is_empty() => {
                 let cover_atom = cover.to_index.atom;
                 if binding_info.has_empty_subset(cover_atom) {
                     return;
@@ -779,12 +771,12 @@ impl<'a> JoinState<'a> {
                 drain_updates!(updates);
                 // Restore the subsets we swapped out.
                 binding_info.move_back_node(cover_atom, cover_node);
-            }),
+            }
             JoinStage::FusedIntersect {
                 cover,
                 bind,
                 to_intersect,
-            } => fused(|| {
+            } => {
                 let cover_atom = cover.to_index.atom;
                 if binding_info.has_empty_subset(cover_atom) {
                     return;
@@ -876,7 +868,7 @@ impl<'a> JoinState<'a> {
                 for (_, atom, prober) in index_probers {
                     binding_info.move_back(atom, prober);
                 }
-            }),
+            }
         }
     }
 }
@@ -949,7 +941,6 @@ impl<'a, 'outer: 'a> ActionBuffer<'a> for InPlaceActionBuffer<'outer> {
     where
         'a: 'b;
 
-    #[inline(never)]
     fn push_bindings(
         &mut self,
         action: ActionId,
@@ -1227,21 +1218,3 @@ impl LocalState {
         }
     }
 }
-
-macro_rules! frame_func {
-    ($name:ident) => {
-        #[inline(always)]
-        pub(crate) fn $name<R>(f: impl FnOnce() -> R) -> R {
-            f()
-        }
-    };
-}
-frame_func!(intersect_a_empty);
-frame_func!(intersect_a);
-frame_func!(intersect_ab);
-frame_func!(intersect_rest);
-frame_func!(fused_empty);
-frame_func!(fused);
-frame_func!(drain_parallel);
-frame_func!(drain_reg);
-frame_func!(push_bindings);
