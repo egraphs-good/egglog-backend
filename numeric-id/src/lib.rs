@@ -152,7 +152,6 @@ impl<K: NumericId, V> DenseIdMap<K, V> {
     }
 
     pub fn raw(&self) -> &[Option<V>] {
-        let todo_resolve = 1;
         &self.data
     }
 

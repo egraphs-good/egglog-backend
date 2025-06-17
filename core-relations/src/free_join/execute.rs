@@ -896,6 +896,10 @@ trait ActionBuffer<'state>: Send {
     /// Push the given bindings to be executed for the specified action. If this
     /// buffer has built up a sufficient batch size, it may execute
     /// `to_exec_state` and then execute the action.
+    ///
+    /// NB: `push_bindings` makes module-specific assumptions on what values are passed to
+    /// `bindings` for a common `action`. This is not a general-purpose trait for that reason and
+    /// it should not, in general, be used outside of this module.
     fn push_bindings(
         &mut self,
         action: ActionId,
@@ -955,10 +959,15 @@ impl<'a, 'outer: 'a> ActionBuffer<'a> for InPlaceActionBuffer<'outer> {
         let action_state = self.batches.get_or_default(action);
         action_state.n_runs += 1;
         action_state.len += 1;
-        action_state.bindings.push(bindings);
+        let action_info = &self.rule_set.actions[action];
+        // SAFETY: `used_vars` is a constant per-rule. This module only ever calls it with
+        // `bindings` produced by the same join.
+        unsafe {
+            action_state.bindings.push(bindings, &action_info.used_vars);
+        }
         if action_state.len >= VAR_BATCH_SIZE {
             let mut state = to_exec_state();
-            state.run_instrs(&self.rule_set.actions[action], &mut action_state.bindings);
+            state.run_instrs(&action_info.instrs, &mut action_state.bindings);
             action_state.bindings.clear();
             action_state.len = 0;
         }
@@ -1023,15 +1032,19 @@ impl<'scope> ActionBuffer<'scope> for ScopedActionBuffer<'_, 'scope> {
         let action_state = self.batches.get_or_default(action);
         action_state.n_runs += 1;
         action_state.len += 1;
-        action_state.bindings.push(bindings);
+        let action_info = &self.rule_set.actions[action];
+        // SAFETY: `used_vars` is a constant per-rule. This module only ever calls it with
+        // `bindings` produced by the same join.
+        unsafe {
+            action_state.bindings.push(bindings, &action_info.used_vars);
+        }
         if action_state.len >= VAR_BATCH_SIZE {
             let mut state = to_exec_state();
             let mut bindings =
                 mem::replace(&mut action_state.bindings, Bindings::new(VAR_BATCH_SIZE));
             action_state.len = 0;
-            let rule_set = self.rule_set;
             self.scope.spawn(move |_| {
-                state.run_instrs(&rule_set.actions[action], &mut bindings);
+                state.run_instrs(&action_info.instrs, &mut bindings);
             });
         }
     }
@@ -1093,7 +1106,7 @@ fn flush_action_states(
 ) {
     for (action, ActionState { bindings, len, .. }) in actions.iter_mut() {
         if *len > 0 {
-            exec_state.run_instrs(&rule_set.actions[action], bindings);
+            exec_state.run_instrs(&rule_set.actions[action].instrs, bindings);
             bindings.clear();
             match_counter.inc_matches(action, *len);
             *len = 0;
@@ -1232,5 +1245,3 @@ frame_func!(fused);
 frame_func!(drain_parallel);
 frame_func!(drain_reg);
 frame_func!(push_bindings);
-frame_func!(push_existing);
-frame_func!(push_new);

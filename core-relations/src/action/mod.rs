@@ -10,10 +10,7 @@ use smallvec::SmallVec;
 
 use crate::{
     common::{DashMap, Value},
-    free_join::{
-        execute::{push_existing, push_new},
-        CounterId, Counters, ExternalFunctions, TableId, TableInfo, Variable,
-    },
+    free_join::{CounterId, Counters, ExternalFunctions, TableId, TableInfo, Variable},
     pool::{with_pool_set, Clear, Pooled},
     table_spec::{ColumnId, MutationBuffer},
     BaseValues, ContainerValues, ExternalFunctionId, WrappedTable,
@@ -105,7 +102,7 @@ pub(crate) struct Bindings {
     max_batch_size: usize,
     data: Pooled<Vec<Value>>,
     /// Points into `data`. data[vars[var].. vars[var]+matches]` contains the values for `data`.
-    vars: DenseIdMap<Variable, usize>,
+    var_offsets: DenseIdMap<Variable, usize>,
 }
 
 impl std::ops::Index<Variable> for Bindings {
@@ -121,14 +118,14 @@ impl Bindings {
             matches: 0,
             max_batch_size,
             data: Default::default(),
-            vars: DenseIdMap::new(),
+            var_offsets: DenseIdMap::new(),
         }
     }
     fn assert_invariant(&self) {
         #[cfg(debug_assertions)]
         {
             assert!(self.matches <= self.max_batch_size);
-            for (var, start) in self.vars.iter() {
+            for (var, start) in self.var_offsets.iter() {
                 assert!(
                     start + self.matches <= self.data.len(),
                     "Variable {:?} starts at {}, but data only has {} elements",
@@ -142,13 +139,13 @@ impl Bindings {
 
     pub(crate) fn clear(&mut self) {
         self.matches = 0;
-        self.vars.clear();
+        self.var_offsets.clear();
         self.data.clear();
         self.assert_invariant();
     }
 
     fn get(&self, var: Variable) -> Option<&[Value]> {
-        let start = self.vars.get(var)?;
+        let start = self.var_offsets.get(var)?;
         Some(&self.data[*start..*start + self.matches])
     }
 
@@ -159,11 +156,11 @@ impl Bindings {
             let target_len = self.data.len() + self.max_batch_size - vals.len();
             self.data.resize(target_len, Value::stale());
         }
-        self.vars.insert(var, start);
+        self.var_offsets.insert(var, start);
     }
 
     pub(crate) fn insert(&mut self, var: Variable, vals: &[Value]) {
-        if self.vars.n_ids() == 0 {
+        if self.var_offsets.n_ids() == 0 {
             self.matches = vals.len();
         } else {
             assert_eq!(self.matches, vals.len());
@@ -172,31 +169,48 @@ impl Bindings {
         self.assert_invariant();
     }
 
-    pub(crate) fn push(&mut self, map: &DenseIdMap<Variable, Value>) {
+    /// Push a new set of bindings for the given variables.
+    ///
+    /// # Safety:
+    /// This method assumes that all calls to `push`:
+    /// * Have a mapping for every member of `used_vars`.
+    /// * Are passed the same `used_vars`.
+    ///
+    /// It is unsafe to avoid bounds-checking. This method is called extremely frequently and the
+    /// overhead of boundschecking is noticeable.
+    pub(crate) unsafe fn push(
+        &mut self,
+        map: &DenseIdMap<Variable, Value>,
+        used_vars: &[Variable],
+    ) {
         if self.matches != 0 {
-            let todo_resolve_safety_issues = 1;
-            push_existing(|| {
-                assert!(self.matches < self.max_batch_size);
-                for (i, val) in map.raw().iter().copied().enumerate() {
-                    let is_some = val.is_some();
-                    let val = val.unwrap_or(Value::stale());
-                    let existing = if is_some {
-                        unsafe { self.vars.raw().get_unchecked(i).unwrap_unchecked() }
-                    } else {
-                        0
-                    };
-                    // SAFETY: we are guaranteed to be in bounds due to the above asssertion.
-                    if is_some {
-                        *unsafe { self.data.get_unchecked_mut(existing + self.matches) } = val;
-                    }
+            assert!(self.matches < self.max_batch_size);
+            #[cfg(debug_assertions)]
+            {
+                for var in used_vars {
+                    assert!(
+                        self.var_offsets.get(*var).is_some(),
+                        "Variable {:?} not found in bindings {:?}",
+                        var,
+                        self.var_offsets
+                    );
                 }
-            })
+            }
+            for var in used_vars {
+                let var = var.index();
+                // Safe version: this degrades some benchmarks by ~6%
+                // let start = self.var_offsets.raw()[var].unwrap();
+                // self.data[start + self.matches] = map.raw()[var].unwrap();
+                unsafe {
+                    let start = self.var_offsets.raw().get_unchecked(var).unwrap_unchecked();
+                    *self.data.get_unchecked_mut(start + self.matches) =
+                        map.raw().get_unchecked(var).unwrap_unchecked();
+                }
+            }
         } else {
-            push_new(|| {
-                for (var, val) in map.iter() {
-                    self.add_mapping(var, &[*val]);
-                }
-            })
+            for (var, val) in map.iter() {
+                self.add_mapping(var, &[*val]);
+            }
         }
 
         self.matches += 1;
@@ -211,7 +225,7 @@ impl Bindings {
     pub(crate) fn take(&mut self, var: Variable) -> Option<ExtractedBinding> {
         let mut vals: Pooled<Vec<Value>> = with_pool_set(|ps| ps.get());
         vals.extend_from_slice(self.get(var)?);
-        let start = self.vars.take(var)?;
+        let start = self.var_offsets.take(var)?;
         Some(ExtractedBinding {
             var,
             offset: start,
@@ -235,7 +249,7 @@ impl Bindings {
         assert_eq!(vals.len(), self.matches);
         self.data
             .splice(offset..offset + self.matches, vals.drain(..));
-        self.vars.insert(var, offset);
+        self.var_offsets.insert(var, offset);
     }
 }
 
@@ -451,7 +465,7 @@ impl<'a> ExecutionState<'a> {
 
 impl ExecutionState<'_> {
     pub(crate) fn run_instrs(&mut self, instrs: &[Instr], bindings: &mut Bindings) {
-        if bindings.vars.next_id().rep() == 0 {
+        if bindings.var_offsets.next_id().rep() == 0 {
             // If we have no variables, we want to run the rules once.
             bindings.matches = 1;
         }
