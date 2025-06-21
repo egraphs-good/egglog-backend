@@ -530,7 +530,7 @@ impl WrappedTable {
         }
     }
 
-    pub(crate) fn as_ref(&self) -> WrappedTableRef {
+    pub(crate) fn as_ref(&self) -> WrappedTableRef<'_> {
         WrappedTableRef {
             inner: &*self.inner,
             wrapper: &*self.wrapper,

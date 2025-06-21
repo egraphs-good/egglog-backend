@@ -63,7 +63,7 @@ impl Mask {
         self.data.union_with(&other.data);
     }
 
-    pub(crate) fn empty_iter(&mut self) -> MaskIterUnit {
+    pub(crate) fn empty_iter(&mut self) -> MaskIterUnit<'_> {
         MaskIterUnit {
             counter: 0,
             mask: &mut self.data,
@@ -231,7 +231,7 @@ pub(crate) trait MaskIter {
         })
     }
 
-    fn zip<T>(self, slice: &[T]) -> ZipIter<Self, T>
+    fn zip<T>(self, slice: &[T]) -> ZipIter<'_, Self, T>
     where
         Self: Sized,
     {

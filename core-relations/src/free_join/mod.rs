@@ -306,7 +306,7 @@ impl Database {
     }
 
     /// Initialize a new rulse set to run against this database.
-    pub fn new_rule_set(&mut self) -> RuleSetBuilder {
+    pub fn new_rule_set(&mut self) -> RuleSetBuilder<'_> {
         RuleSetBuilder::new(self)
     }
 
@@ -400,7 +400,7 @@ impl Database {
         f(&mut state)
     }
 
-    pub(crate) fn read_only_view(&self) -> DbView {
+    pub(crate) fn read_only_view(&self) -> DbView<'_> {
         DbView {
             table_info: &self.tables,
             counters: &self.counters,
