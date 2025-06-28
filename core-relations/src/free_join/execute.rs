@@ -473,7 +473,7 @@ impl<'a> JoinState<'a> {
         }
         let chunk_size = action_buf.morsel_size(cur, instr_order.len());
         let mut cur_size = estimate_size(&plan.stages.instrs[instr_order.get(cur)], binding_info);
-        if cur_size > 32 && cur_size % 2 == 1 && cur < instr_order.len() - 1 {
+        if cur_size > 32 && cur_size % 3 == 1 && cur < instr_order.len() - 1 {
             // If we have a reasonable number of tuples to process, adjust the variable order.
             sort_plan_by_size(instr_order, cur, &plan.stages.instrs, binding_info);
             cur_size = estimate_size(&plan.stages.instrs[instr_order.get(cur)], binding_info);

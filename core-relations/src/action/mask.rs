@@ -253,11 +253,13 @@ where
     Vec<T>: InPoolSet<PoolSet>,
 {
     type Item = Pooled<Vec<T>>;
+
     fn inc_counter(&mut self) -> usize {
         let res = self.counter;
         self.counter += 1;
         res
     }
+
     fn get_at(&mut self, idx: usize) -> IterResult<Self::Item> {
         if self.mask.contains(idx) {
             let mut result = self.pool.get();
@@ -273,6 +275,7 @@ where
             IterResult::Done
         }
     }
+
     fn remove(&mut self, idx: usize) {
         self.mask.set(idx, false);
     }
@@ -285,11 +288,13 @@ pub(crate) struct MaskIterUnit<'mask> {
 
 impl<'mask> MaskIter for MaskIterUnit<'mask> {
     type Item = ();
+
     fn inc_counter(&mut self) -> usize {
         let res = self.counter;
         self.counter += 1;
         res
     }
+
     fn get_at(&mut self, idx: usize) -> IterResult<()> {
         if self.mask.contains(idx) {
             IterResult::Item(())
@@ -299,6 +304,7 @@ impl<'mask> MaskIter for MaskIterUnit<'mask> {
             IterResult::Done
         }
     }
+
     fn remove(&mut self, idx: usize) {
         self.mask.set(idx, false);
     }
@@ -312,11 +318,13 @@ pub(crate) struct MaskIterBase<'slice, 'mask, T> {
 
 impl<'slice, T> MaskIter for MaskIterBase<'slice, '_, T> {
     type Item = &'slice T;
+
     fn inc_counter(&mut self) -> usize {
         let res = self.counter;
         self.counter += 1;
         res
     }
+
     fn get_at(&mut self, idx: usize) -> IterResult<&'slice T> {
         if self.mask.contains(idx) {
             IterResult::Item(&self.slice[idx])
@@ -326,6 +334,7 @@ impl<'slice, T> MaskIter for MaskIterBase<'slice, '_, T> {
             IterResult::Done
         }
     }
+
     fn remove(&mut self, idx: usize) {
         self.mask.set(idx, false);
     }
@@ -337,9 +346,11 @@ pub(crate) struct ZipIter<'slice, Base, T> {
 
 impl<'slice, Base: MaskIter, T> MaskIter for ZipIter<'slice, Base, T> {
     type Item = (Base::Item, &'slice T);
+
     fn inc_counter(&mut self) -> usize {
         self.base.inc_counter()
     }
+
     fn get_at(&mut self, idx: usize) -> IterResult<Self::Item> {
         match self.base.get_at(idx) {
             IterResult::Item(base) => IterResult::Item((base, &self.slice[idx])),

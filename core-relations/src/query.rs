@@ -212,6 +212,7 @@ impl<'outer, 'a> QueryBuilder<'outer, 'a> {
     }
 
     fn mark_defined(&mut self, entry: &QueryEntry) {
+        // TODO: use some of this information in query planning, e.g. dedup at match time.
         if let QueryEntry::Var(v) = entry {
             self.query.var_info[*v].defined_in_rhs = true;
         }

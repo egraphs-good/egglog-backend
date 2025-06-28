@@ -98,8 +98,10 @@ impl From<Value> for MergeVal {
 /// struct-of-arrays style that is better laid out for processing bindings in batches.
 #[derive(Debug)]
 pub(crate) struct Bindings {
-    // INVARIANT: self.vars.iter().map(|(_, v)| v.len() == self.matches)
     matches: usize,
+    /// The maximum number of calls to `push` that we can receive before we clear the
+    /// [`Bindings`].
+    // This is used to preallocate chunks of the flat `data` vector.
     max_batch_size: usize,
     data: Pooled<Vec<Value>>,
     /// Points into `data`. data[vars[var].. vars[var]+matches]` contains the values for `data`.
@@ -153,6 +155,7 @@ impl Bindings {
     fn add_mapping(&mut self, var: Variable, vals: &[Value]) {
         let start = self.data.len();
         self.data.extend_from_slice(vals);
+        debug_assert!(vals.len() <= self.max_batch_size);
         if vals.len() < self.max_batch_size {
             let target_len = self.data.len() + self.max_batch_size - vals.len();
             self.data.resize(target_len, Value::stale());
@@ -254,6 +257,10 @@ impl Bindings {
     }
 }
 
+/// A binding that has been extracted from a [`Bindings`] struct via the [`Bindings::take`] method.
+///
+/// This allows for a variable's contents to be read while the [`Bindings`] struct has been
+/// borrowed mutably. The contents will not be readable until [`Bindings::replace`] is called.
 pub(crate) struct ExtractedBinding {
     var: Variable,
     offset: usize,
