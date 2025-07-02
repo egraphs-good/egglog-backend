@@ -155,6 +155,9 @@ impl Bindings {
     fn add_mapping(&mut self, var: Variable, vals: &[Value]) {
         let start = self.data.len();
         self.data.extend_from_slice(vals);
+        // We have a flat representation of the data, meaning that writing more than
+        // `max_batch_size` values to `var` could overwrite values for a different variable, which
+        // would produce some mysterious results that are hard to debug.
         debug_assert!(vals.len() <= self.max_batch_size);
         if vals.len() < self.max_batch_size {
             let target_len = self.data.len() + self.max_batch_size - vals.len();

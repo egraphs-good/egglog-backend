@@ -1,5 +1,16 @@
 //! A data-structure for low-overhead buffering of updates in a free join
 //! execution.
+//!
+//! Free Join is a recursive algorithm that that discovers a candidate binding for a particular
+//! variable in a query and then recursively runs the rest of the join restricted for that binding
+//! holding. Once the "sub-join" finishes, the outer recursive call backtracks, adds a separate
+//! binding, and then repeats.
+//!
+//! The Free Join paper observed that this resulted in poor cache behavior because for every cell
+//! iterated over in an outer stage, we had to do several other steps on successive inner stages.
+//! Instead, we can accumulate a set of new bindings in a separate buffer and then iterate over
+//! those bindings in recursive calls. When parallelism is enabled, this data-structure allows us
+//! hand over an entire batch of recursive calls to a separate thread to process independently.
 
 use numeric_id::{define_id, DenseIdMap};
 
