@@ -457,7 +457,7 @@ impl<T: Table> TableWrapper for WrapperImpl<T> {
     ) {
         let table = table.as_any().downcast_ref::<T>().unwrap();
         let mut out = with_pool_set(PoolSet::get::<Vec<Value>>);
-        process_vec!(mask, args, bindings, |iter| {
+        for_each_binding_with_mask!(mask, args, bindings, |iter| {
             iter.fill_vec(&mut out, Value::stale, |_, args| {
                 table.get_row_column(args.as_slice(), col)
             })
@@ -477,7 +477,7 @@ impl<T: Table> TableWrapper for WrapperImpl<T> {
     ) {
         let table = table.as_any().downcast_ref::<T>().unwrap();
         let mut out = with_pool_set(|ps| ps.get::<Vec<Value>>());
-        process_vec!(mask, args, bindings, |iter| {
+        for_each_binding_with_mask!(mask, args, bindings, |iter| {
             match default {
                 QueryEntry::Var(default) => iter.zip(&bindings[default]).fill_vec(
                     &mut out,

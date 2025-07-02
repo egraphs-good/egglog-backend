@@ -194,7 +194,7 @@ pub(crate) trait ExternalFunctionExt: ExternalFunction {
         let pool: Pool<Vec<Value>> = with_pool_set(|ps| ps.get_pool().clone());
         let mut out = pool.get();
         out.reserve(mask.len());
-        process_vec!(mask, args, bindings, |iter| {
+        for_each_binding_with_mask!(mask, args, bindings, |iter| {
             iter.fill_vec(&mut out, Value::stale, |_, args| {
                 self.invoke(state, args.as_slice())
             });
@@ -217,7 +217,7 @@ pub(crate) trait ExternalFunctionExt: ExternalFunction {
         out_var: Variable,
     ) {
         let mut out = bindings.take(out_var).expect("out_var must be bound");
-        process_vec!(mask, args, bindings, |iter| {
+        for_each_binding_with_mask!(mask, args, bindings, |iter| {
             iter.assign_vec_and_retain(&mut out.vals, |_, args| self.invoke(state, &args))
         });
         bindings.replace(out);

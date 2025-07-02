@@ -538,7 +538,7 @@ impl ExecutionState<'_> {
                     return;
                 }
                 let mut out = bindings.take(*dst_var).unwrap();
-                process_vec!(mask_copy, args.as_slice(), bindings, |iter| {
+                for_each_binding_with_mask!(mask_copy, args.as_slice(), bindings, |iter| {
                     iter.assign_vec(&mut out.vals, |offset, key| {
                         // First, check if the entry is already in the table:
                         // if let Some(row) = table.get_row_column(&key, *dst_col) {
@@ -648,7 +648,7 @@ impl ExecutionState<'_> {
                 *mask = lookup_result;
             }
             Instr::Insert { table, vals } => {
-                process_vec!(mask, vals.as_slice(), bindings, |iter| {
+                for_each_binding_with_mask!(mask, vals.as_slice(), bindings, |iter| {
                     iter.for_each(|vals| {
                         self.stage_insert(*table, vals.as_slice());
                     })
@@ -656,7 +656,7 @@ impl ExecutionState<'_> {
             }
             Instr::InsertIfEq { table, l, r, vals } => match (l, r) {
                 (QueryEntry::Var(v1), QueryEntry::Var(v2)) => {
-                    process_vec!(mask, vals.as_slice(), bindings, |iter| {
+                    for_each_binding_with_mask!(mask, vals.as_slice(), bindings, |iter| {
                         iter.zip(&bindings[*v1])
                             .zip(&bindings[*v2])
                             .for_each(|((vals, v1), v2)| {
@@ -668,7 +668,7 @@ impl ExecutionState<'_> {
                 }
                 (QueryEntry::Var(v), QueryEntry::Const(c))
                 | (QueryEntry::Const(c), QueryEntry::Var(v)) => {
-                    process_vec!(mask, vals.as_slice(), bindings, |iter| {
+                    for_each_binding_with_mask!(mask, vals.as_slice(), bindings, |iter| {
                         iter.zip(&bindings[*v]).for_each(|(vals, cond)| {
                             if cond == c {
                                 self.stage_insert(*table, &vals);
@@ -678,16 +678,15 @@ impl ExecutionState<'_> {
                 }
                 (QueryEntry::Const(c1), QueryEntry::Const(c2)) => {
                     if c1 == c2 {
-                        process_vec!(mask, vals.as_slice(), bindings, |iter| iter.for_each(
-                            |vals| {
+                        for_each_binding_with_mask!(mask, vals.as_slice(), bindings, |iter| iter
+                            .for_each(|vals| {
                                 self.stage_insert(*table, &vals);
-                            }
-                        ))
+                            }))
                     }
                 }
             },
             Instr::Remove { table, args } => {
-                process_vec!(mask, args.as_slice(), bindings, |iter| {
+                for_each_binding_with_mask!(mask, args.as_slice(), bindings, |iter| {
                     iter.for_each(|args| {
                         self.stage_remove(*table, args.as_slice());
                     })
@@ -729,7 +728,7 @@ impl ExecutionState<'_> {
                 *mask = f1_result;
             }
             Instr::AssertAnyNe { ops, divider } => {
-                process_vec!(mask, ops.as_slice(), bindings, |iter| {
+                for_each_binding_with_mask!(mask, ops.as_slice(), bindings, |iter| {
                     iter.retain(|vals| {
                         vals[0..*divider]
                             .iter()

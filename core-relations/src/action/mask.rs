@@ -400,7 +400,7 @@ pub(crate) enum ValueSource<'a, T> {
 /// difficult to call and requires materializing a vector for each iteration. This macro
 /// special-cases small slices of arguments and uses custom iterator invocations for those,
 /// avoiding any heap allocations for them.
-macro_rules! process_vec {
+macro_rules! for_each_binding_with_mask {
     ($mask:expr, $args:expr, $bindings:expr, |$iter:ident| $body:expr) => {{
         match $args {
             [] => {
