@@ -26,6 +26,7 @@ use crate::{
 use crate::{CachedPlanInfo, RowVals, SchemaMath, NOT_SUBSUMED, SUBSUMED};
 
 define_id!(pub Variable, u32, "A variable in an egglog query");
+define_id!(pub AtomId, u32, "an atom in an egglog query");
 pub(crate) type DstVar = core_relations::QueryEntry;
 
 #[derive(Debug, Error)]
@@ -350,7 +351,7 @@ impl RuleBuilder<'_> {
         func: Option<FunctionId>,
         subsume_entry: Option<QueryEntry>,
         entries: &[QueryEntry],
-    ) {
+    ) -> AtomId {
         let mut atom = entries.to_vec();
         let schema_math = if let Some(func) = func {
             let info = &self.egraph.funcs[func];
@@ -413,7 +414,9 @@ impl RuleBuilder<'_> {
                 }
             }
         }
+        let res = AtomId::from_usize(self.query.atoms.len());
         self.query.atoms.push((table, atom, schema_math));
+        res
     }
 
     pub fn call_external_func(
@@ -448,7 +451,7 @@ impl RuleBuilder<'_> {
         func: FunctionId,
         entries: &[QueryEntry],
         is_subsumed: Option<bool>,
-    ) -> Result<()> {
+    ) -> Result<AtomId> {
         let info = &self.egraph.funcs[func];
         let schema = &info.schema;
         if schema.len() != entries.len() {
@@ -465,7 +468,7 @@ impl RuleBuilder<'_> {
                 self.assert_has_ty(entry, *ty)
                     .with_context(|| format!("query_table: mismatch between {entry:?} and {ty:?}"))
             })?;
-        self.add_atom_with_timestamp_and_func(
+        Ok(self.add_atom_with_timestamp_and_func(
             info.table,
             Some(func),
             is_subsumed.map(|b| QueryEntry::Const {
@@ -476,8 +479,7 @@ impl RuleBuilder<'_> {
                 ty: ColumnTy::Id,
             }),
             entries,
-        );
-        Ok(())
+        ))
     }
 
     /// Add the given primitive atom to query. As elsewhere in the crate, the last
