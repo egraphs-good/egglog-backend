@@ -26,7 +26,7 @@ use core_relations::{
 use hashbrown::HashMap;
 use indexmap::{map::Entry, IndexMap, IndexSet};
 use log::info;
-use numeric_id::{define_id, DenseIdMap, DenseIdMapWithReuse, NumericId};
+use numeric_id::{define_id, DenseIdMap, DenseIdMapWithReuse, IdVec, NumericId};
 use once_cell::sync::Lazy;
 use proof_spec::{ProofReason, ProofReconstructionState, ReasonSpecId};
 use smallvec::SmallVec;
@@ -79,7 +79,8 @@ pub struct EGraph {
     /// also serve as a debugging tool in the case that the number of panic messages grows without
     /// bound.
     panic_funcs: HashMap<String, ExternalFunctionId>,
-    proof_specs: DenseIdMap<ReasonSpecId, Arc<ProofReason>>,
+    proof_specs: IdVec<ReasonSpecId, Arc<ProofReason>>,
+    cong_spec: ReasonSpecId,
     /// Side tables used to store proof information. We initialize these lazily
     /// as a proof object with a given number of parameters is added.
     reason_tables: IndexMap<usize /* arity */, TableId>,
@@ -133,6 +134,8 @@ impl EGraph {
         let ts_counter = db.add_counter();
         // Start the timestamp counter at 1.
         db.inc_counter(ts_counter);
+        let mut proof_specs = IdVec::default();
+        let cong_spec = proof_specs.push(Arc::new(ProofReason::CongRow));
 
         Self {
             db,
@@ -144,7 +147,8 @@ impl EGraph {
             funcs: Default::default(),
             panic_message: Default::default(),
             panic_funcs: Default::default(),
-            proof_specs: Default::default(),
+            proof_specs,
+            cong_spec,
             reason_tables: Default::default(),
             term_tables: Default::default(),
             tracing,

@@ -232,10 +232,9 @@ impl ProofBuilder {
         vars: RebuildVars,
         db: &mut EGraph,
     ) -> impl Fn(&mut Bindings, &mut RuleBuilder) -> Result<()> + Clone {
-        // TODO/optimization: we only ever need one CongRow reason.
-        let reason_spec = Arc::new(ProofReason::CongRow);
+        let reason_spec = ProofReason::CongRow;
         let reason_table = db.reason_table(&reason_spec);
-        let reason_spec_id = db.proof_specs.push(reason_spec);
+        let reason_spec_id = db.cong_spec;
         let reason_counter = db.reason_counter;
         let func_table = db.funcs[func].table;
         let term_table = db.term_table(func_table);
