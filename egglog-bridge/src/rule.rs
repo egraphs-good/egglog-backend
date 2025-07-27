@@ -4,6 +4,7 @@
 //! parameterized by a range of timestamps used as constraints during seminaive
 //! evaluation.
 
+use std::mem;
 use std::{cmp::Ordering, sync::Arc};
 
 use anyhow::Context;
@@ -17,6 +18,7 @@ use numeric_id::{define_id, DenseIdMap, NumericId};
 use smallvec::SmallVec;
 use thiserror::Error;
 
+use crate::new_syntax::SourceSyntax;
 use crate::syntax::{Binding, Entry, Statement, TermFragment};
 use crate::term_proof_dag::BaseValueConstant;
 use crate::{
@@ -136,6 +138,8 @@ pub(crate) struct Query {
     /// The current proofs that are in scope.
     atom_proofs: Vec<Variable>,
     atoms: Vec<(TableId, Vec<QueryEntry>, SchemaMath)>,
+    /// An optional callback to wire up proof-related metadata before running the RHS of a rule.
+    build_reason: Option<BuildRuleCallback>,
     /// The builders for queries in this module essentially wrap the lower-level
     /// builders from the `core_relations` crate. A single egglog rule can turn
     /// into N core-relations rules. The code is structured by constructing a
@@ -175,6 +179,7 @@ impl EGraph {
                 tracing,
                 rule_id,
                 seminaive,
+                build_reason: None,
                 sole_focus: None,
                 atom_proofs: Default::default(),
                 vars: Default::default(),
@@ -299,15 +304,37 @@ impl RuleBuilder<'_> {
     }
 
     /// Register the given rule with the egraph.
-    pub fn build(mut self) -> RuleId {
+    pub fn build(self) -> RuleId {
+        let todo_assert_no_tracing = 1;
+        self.build_internal(None)
+    }
+
+    pub fn build_with_syntax(self, syntax: SourceSyntax) -> RuleId {
+        self.build_internal(Some(syntax))
+    }
+
+    fn build_internal(mut self, syntax: Option<SourceSyntax>) -> RuleId {
         if self.query.atoms.len() == 1 {
             self.query.plan_strategy = PlanStrategy::MinCover;
+        }
+        if let Some(syntax) = &syntax {
+            if self.egraph.tracing {
+                let cb = self
+                    .proof_builder
+                    .create_reason(syntax.clone(), self.egraph);
+                self.query.build_reason = Some(Box::new(move |bndgs, rb| {
+                    let reason = cb(bndgs, rb)?;
+                    bndgs.lhs_reason = Some(reason.into());
+                    Ok(())
+                }));
+            }
         }
         let res = self.query.rule_id;
         let info = RuleInfo {
             last_run_at: Timestamp::new(0),
             query: self.query,
             syntax: self.proof_builder.syntax,
+            source_syntax: syntax,
             cached_plan: None,
             desc: self.proof_builder.rule_description,
         };
@@ -384,9 +411,11 @@ impl RuleBuilder<'_> {
                 ret_val: None,
             },
         );
+        let res = AtomId::from_usize(self.query.atoms.len());
         if self.egraph.tracing {
             let proof_var = atom[schema_math.proof_id_col()].var();
             self.proof_builder.add_lhs(entries, proof_var);
+            self.proof_builder.term_vars.insert(res, proof_var.into());
             self.query.atom_proofs.push(proof_var);
             if let Some(func) = func {
                 // If we have a function, record its syntax as a LHS term.
@@ -414,7 +443,6 @@ impl RuleBuilder<'_> {
                 }
             }
         }
-        let res = AtomId::from_usize(self.query.atoms.len());
         self.query.atoms.push((table, atom, schema_math));
         res
     }
@@ -1023,6 +1051,7 @@ impl Query {
         let mut inner = Bindings {
             uf_table: self.uf_table,
             next_ts: None,
+            lhs_reason: None,
             mapping: Default::default(),
             grounded: Default::default(),
         };
@@ -1040,6 +1069,10 @@ impl Query {
     ) -> Result<core_relations::RuleId> {
         let mut rb = qb.build();
         inner.next_ts = Some(rb.read_counter(self.ts_counter).into());
+        // Set up proof state if it's configured.
+        if let Some(build_reason) = &self.build_reason {
+            build_reason(&mut inner, &mut rb)?;
+        }
         self.add_rule
             .iter()
             .try_for_each(|f| f(&mut inner, &mut rb))?;
@@ -1138,6 +1171,9 @@ impl Query {
 pub(crate) struct Bindings {
     uf_table: TableId,
     next_ts: Option<DstVar>,
+    /// If proofs are enabled, this variable contains the "reason id" for any union or insertion
+    /// that happens on the RHS of a rule.
+    lhs_reason: Option<DstVar>,
     pub(crate) mapping: DenseIdMap<Variable, DstVar>,
     grounded: HashSet<Variable>,
 }

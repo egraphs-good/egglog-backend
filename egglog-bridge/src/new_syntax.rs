@@ -1,7 +1,6 @@
 //! A new replacement for the `syntax` module. We eventually want to replace `syntax.rs` with this
 //! module.
-#![allow(unused)] // TODO: remove this
-use std::iter;
+use std::{iter, sync::Arc};
 
 use crate::{EGraph, ProofReason, QueryEntry, ReasonSpecId, Result, SchemaMath, NOT_SUBSUMED};
 use core_relations::{
@@ -17,8 +16,9 @@ use crate::{
     ColumnTy, FunctionId, RuleId,
 };
 
-define_id!(pub(crate) SyntaxId, u32, "an offset into a Syntax DAG.");
+define_id!(pub SyntaxId, u32, "an offset into a Syntax DAG.");
 
+#[derive(Debug, Clone)]
 pub enum TopLevelLhsExpr {
     /// Simply requires the presence of a term matching the given [`SourceExpr`].
     Exists(SyntaxId),
@@ -28,6 +28,7 @@ pub enum TopLevelLhsExpr {
 
 /// Representative source syntax for _one line_ of an egglog query, namely, the left-hand-side of
 /// an egglog rule.
+#[derive(Debug, Clone)]
 pub enum SourceExpr {
     /// A constant.
     Const { ty: ColumnTy, val: Value },
@@ -55,6 +56,7 @@ pub enum SourceExpr {
 
 /// A data-structure representing an egglog query. Essentially, multiple [`SourceExpr`]s, one per
 /// line, along with a backing store accounting for subterms indexed by [`SyntaxId].
+#[derive(Debug, Clone, Default)]
 pub struct SourceSyntax {
     backing: IdVec<SyntaxId, SourceExpr>,
     vars: Vec<Variable>,
@@ -62,6 +64,23 @@ pub struct SourceSyntax {
 }
 
 impl SourceSyntax {
+    /// Add `expr` to the known syntax of the [`SourceSyntax`].
+    ///
+    /// The returned [`SyntaxId`] can be used to construct another [`SourceExpr`] or a
+    /// [`TopLevelLhsExpr`].
+    pub fn add_expr(&mut self, expr: SourceExpr) -> SyntaxId {
+        match &expr {
+            SourceExpr::Const { .. } | SourceExpr::FunctionCall { .. } => {}
+            SourceExpr::Var { id, .. } => self.vars.push(*id),
+            SourceExpr::ExternalCall { var, .. } => self.vars.push(*var),
+        };
+        self.backing.push(expr)
+    }
+
+    /// Add `expr` to the toplevel representation of the syntax.
+    pub fn add_toplevel_expr(&mut self, expr: TopLevelLhsExpr) {
+        self.roots.push(expr);
+    }
     fn funcs(&self) -> impl Iterator<Item = FunctionId> + '_ {
         self.backing.iter().filter_map(|(_, v)| {
             if let SourceExpr::FunctionCall { func, .. } = v {
@@ -77,18 +96,16 @@ type TodoRenameRuleData2ToRuleData = ();
 
 /// The data associated with a proof of a given term whose premises are given by a
 /// [`SourceSyntax`].
+#[derive(Debug)]
 pub(crate) struct RuleData2 {
-    rule: RuleId,
+    rule_id: RuleId,
     syntax: SourceSyntax,
     // That's it?
 }
 
 impl RuleData2 {
-    fn arity(&self) -> usize {
-        // To justify a rule application, we need to instantiate any terms explicitly, but the
-        // proof reason doesn't need those terms themselves: it just needs the syntax and a
-        // concrete substitution from variable => value.
-        1 + self.syntax.vars.len()
+    pub(crate) fn n_vars(&self) -> usize {
+        self.syntax.vars.len()
     }
 }
 
@@ -96,19 +113,22 @@ impl ProofBuilder {
     pub(crate) fn create_reason(
         &mut self,
         syntax: SourceSyntax,
-        atom_mapping: DenseIdMap<AtomId, QueryEntry>,
         egraph: &mut EGraph,
-    ) -> impl Fn(&mut Bindings, &mut RuleBuilder) -> Result<core_relations::Variable> {
+    ) -> impl Fn(&mut Bindings, &mut RuleBuilder) -> Result<core_relations::Variable> + Clone {
         // first, create all the relevant cong metadata
         let mut metadata = DenseIdMap::default();
         for func in syntax.funcs() {
             metadata.insert(func, self.build_cong_metadata(func, egraph));
         }
 
-        let todo_wire_in_reasons = 1;
-        let reason_id = ReasonSpecId::new(!0);
-        let reason_table = TableId::new(!0);
+        let reason_spec = Arc::new(ProofReason::Rule2(RuleData2 {
+            rule_id: self.rule_id,
+            syntax: syntax.clone(),
+        }));
+        let reason_table = egraph.reason_table(&reason_spec);
+        let reason_id = egraph.proof_specs.push(reason_spec);
         let reason_counter = egraph.reason_counter;
+        let atom_mapping = self.term_vars.clone();
         move |bndgs, rb| {
             // Now, insert all needed reconstructed terms.
             let mut state = TermReconstructionState {
@@ -172,50 +192,6 @@ impl ProofBuilder {
             schema_math,
         }
     }
-
-    pub(crate) fn justify_query_old(
-        &mut self,
-        func: FunctionId,
-        args: Vec<QueryEntry>,
-        old_term: QueryEntry,
-        res_var: Variable,
-        egraph: &mut EGraph,
-    ) -> impl Fn(&mut Bindings, &mut RuleBuilder) -> Result<()> {
-        let func_info = &egraph.funcs[func];
-        let func_underlying = func_info.table;
-        let schema_math = SchemaMath {
-            subsume: func_info.can_subsume,
-            tracing: true,
-            func_cols: func_info.schema.len(),
-        };
-        let term_col = ColumnId::from_usize(schema_math.proof_id_col());
-        let cong_args = CongArgs {
-            func_table: func,
-            func_underlying,
-            schema_math,
-            reason_table: egraph.reason_table(&ProofReason::CongRow),
-            term_table: egraph.term_table(func_underlying),
-            reason_counter: egraph.reason_counter,
-            term_counter: egraph.id_counter,
-            ts_counter: egraph.timestamp_counter,
-            reason_spec_id: egraph.cong_spec,
-        };
-
-        let cong_row_id = egraph.register_external_func(make_external_func(move |es, vals| {
-            cong_term(&cong_args, es, vals)
-        }));
-        move |bndgs, rb: &mut RuleBuilder| {
-            let args = bndgs.convert_all(&args);
-            let old_term = bndgs.convert(&old_term);
-            let mut buf = SmallVec::<[core_relations::QueryEntry; 4]>::new();
-            buf.push(old_term);
-            buf.extend_from_slice(&args);
-            let res =
-                rb.lookup_with_fallback(func_underlying, &args, term_col, cong_row_id, &buf)?;
-            bndgs.mapping.insert(res_var, res.into());
-            Ok(())
-        }
-    }
 }
 
 /// Metadata needed to reconstruct a term whose head corresponds to a particular function.
@@ -252,24 +228,21 @@ impl TermReconstructionState<'_> {
         }
         let syntax = self.syntax;
         let res = match &syntax.backing[node] {
-            SourceExpr::Const { ty, val } => return Ok(core_relations::QueryEntry::Const(*val)),
-            SourceExpr::Var { id, name } => bndgs.mapping[*id],
-            SourceExpr::ExternalCall { var, func, args } => {
+            SourceExpr::Const { val, .. } => return Ok(core_relations::QueryEntry::Const(*val)),
+            SourceExpr::Var { id, .. } => bndgs.mapping[*id],
+            SourceExpr::ExternalCall { var, args, .. } => {
                 for arg in args {
                     self.justify_query(*arg, bndgs, rb)?;
                 }
                 bndgs.mapping[*var]
             }
             SourceExpr::FunctionCall { func, atom, args } => {
-                let mut buf: Vec<core_relations::QueryEntry> =
-                    vec![core_relations::QueryEntry::Const(Value::from_usize(
-                        func.index(),
-                    ))];
+                let old_term = bndgs.convert(&self.atom_mapping[*atom]);
+                let mut buf: Vec<core_relations::QueryEntry> = vec![old_term];
 
                 for arg in args.iter().map(|s| self.justify_query(*s, bndgs, rb)) {
                     buf.push(arg?);
                 }
-                let old_term = bndgs.convert(&self.atom_mapping[*atom]);
                 let FunctionCongMetadata {
                     table,
                     build_term,
@@ -335,25 +308,12 @@ fn cong_term(args: &CongArgs, es: &mut ExecutionState, vals: &[Value]) -> Option
     Some(term_val)
 }
 
-// Concrete next steps:
-// [x] fill in create_reason (this will be the hard bit, building a term, inserting a reason).
-// * Process for each `FunctionCall`
-//   - We'll have a term that's like "look up term or else call this external function which will
-//   insert a reason and also a term"
-// [x] - That external function needs its own instruction (LookupOrCallFallbackExternal) (this was
-// already there)
-// [x] - That external function just needs to take the old term id, the new term, + insert a cong.
-//       It can be one global external func.
-// =====
-// Now how do we put this all together?
-//
-//
-// Still rewrite a set => lookup+union
-// [ ] Set and Lookup and Union all need to take a &SourceSyntax arg when proofs are enabled.
-// [ ] With that arg, they create_reason unconditionally and then lookup_or_insert accordinly. This
-// is wasteful. We could do some sort of recursive fallback thing maybe but it's complicated.
-// (doable with more sophisticated branching in the IR but kinda tricky right now).
-// [ ] That should get us back to parity and we can send a PR + delete some old proofs code.
+// Next steps to get to parity:
+// [ ] use the reason var in insertions / lookup-or-insert / union, rather than the old thign
+// [x] builder API for SourceSyntax
+// [ ] get rid of all unused warnings
+// [ ] proof reconstruction, but no checker
+// [ ] rip everything out
 //
 // =====
 // What happens after parity?

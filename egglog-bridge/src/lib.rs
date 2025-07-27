@@ -41,6 +41,7 @@ pub(crate) mod term_proof_dag;
 #[cfg(test)]
 mod tests;
 
+pub use new_syntax::{SourceExpr, SourceSyntax, TopLevelLhsExpr};
 pub use rule::{Function, QueryEntry, RuleBuilder};
 use syntax::RuleRepresentation;
 use term_proof_dag::TermEnv;
@@ -1013,6 +1014,7 @@ struct RuleInfo {
     last_run_at: Timestamp,
     query: rule::Query,
     syntax: RuleRepresentation,
+    source_syntax: Option<SourceSyntax>,
     cached_plan: Option<CachedPlanInfo>,
     desc: Arc<str>,
 }

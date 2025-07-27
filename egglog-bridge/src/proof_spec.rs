@@ -5,10 +5,11 @@ use core_relations::{
     ProofReason as UfProofReason, ProofStep, RuleBuilder, Value,
 };
 use hashbrown::{HashMap, HashSet};
-use numeric_id::{define_id, NumericId};
+use numeric_id::{define_id, DenseIdMap, NumericId};
 
 use crate::{
-    rule::{Bindings, DstVar, Variable},
+    new_syntax::{RuleData2, SourceSyntax},
+    rule::{AtomId, Bindings, DstVar, Variable},
     syntax::{Binding, RuleRepresentation, TermFragment},
     term_proof_dag::{BaseValueConstant, EqProof, EqReason, RuleTarget, TermProof, TermValue},
     ColumnTy, EGraph, FunctionId, GetFirstMatch, QueryEntry, Result, RuleId, SideChannel,
@@ -23,6 +24,7 @@ define_id!(pub(crate) ReasonSpecId, u32, "A unique identifier for the step in a 
 #[derive(Debug)]
 pub(crate) enum ProofReason {
     Rule(RuleData),
+    Rule2(RuleData2),
     /// Congrence reasons contain the "old" term id that the new term is equal
     /// to. Pairwise equalty proofs are rebuilt at proof reconstruction time.
     CongRow,
@@ -90,6 +92,7 @@ impl ProofReason {
                 ..
             }) => *n_canonical + lhs_atoms.len() + rhs_atoms.len(),
             ProofReason::CongRow => 1,
+            ProofReason::Rule2(data) => data.n_vars(),
             ProofReason::Fiat { .. } => 0,
         }
     }
@@ -106,9 +109,11 @@ pub(crate) enum Insertable {
 
 pub(crate) type SyntaxEnv = HashMap<Variable, Arc<TermFragment<Variable>>>;
 
+type TodoMakeSourceSyntaxFieldInProofBuilderNonOptional = ();
+
 pub(crate) struct ProofBuilder {
     pub(crate) rule_description: Arc<str>,
-    rule_id: RuleId,
+    pub(crate) rule_id: RuleId,
     lhs_atoms: Vec<Vec<QueryEntry>>,
     /// The atom against which to compare during proofs. Serves as a guide for
     /// generating equality proofs.
@@ -121,6 +126,9 @@ pub(crate) struct ProofBuilder {
     // rule.
     pub(crate) syntax_env: SyntaxEnv,
     pub(crate) syntax: RuleRepresentation,
+
+    source_syntax: Option<SourceSyntax>,
+    pub(crate) term_vars: DenseIdMap<AtomId, QueryEntry>,
 }
 
 pub(crate) struct RebuildVars {
@@ -142,6 +150,8 @@ impl ProofBuilder {
             representatives: Default::default(),
             syntax_env: Default::default(),
             syntax: Default::default(),
+            source_syntax: None,
+            term_vars: Default::default(),
         }
     }
 
@@ -484,6 +494,10 @@ impl EGraph {
             ProofReason::Rule(data) => {
                 self.create_rule_proof(data, &term_row[1..term_row.len() - 2], &reason_row, state)
             }
+            ProofReason::Rule2(data) => {
+                let todo_fill_in = 1;
+                todo!()
+            }
             ProofReason::CongRow => self.create_cong_proof(reason_row[1], term_id, state),
             ProofReason::Fiat { desc } => {
                 let func_id = FunctionId::new(term_row[0].rep());
@@ -724,6 +738,10 @@ impl EGraph {
                 let r_term = self.explain_term_inner(r, state);
                 let term_proof = self.create_rule_proof(data, &[l, r], &reason_row, state);
                 state.base(term_proof, l_term, r_term)
+            }
+            ProofReason::Rule2(data) => {
+                let todo_fill_in = 1;
+                todo!()
             }
             ProofReason::CongRow => {
                 let l_term = self.explain_term_inner(l, state);
