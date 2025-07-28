@@ -4,7 +4,6 @@
 //! parameterized by a range of timestamps used as constraints during seminaive
 //! evaluation.
 
-use std::mem;
 use std::{cmp::Ordering, sync::Arc};
 
 use anyhow::Context;
@@ -836,13 +835,13 @@ impl RuleBuilder<'_> {
                 }
             }
             let reason_var = self.new_var(ColumnTy::Id);
-            let add_proof = self
-                .proof_builder
-                .union(l.clone(), r.clone(), reason_var, self.egraph);
+            let add_proof = self.proof_builder.make_reason(reason_var, self.egraph);
             Box::new(move |inner, rb| {
                 let l = inner.convert(&l);
                 let r = inner.convert(&r);
-                add_proof(inner, rb)?;
+                if !inner.mapping.contains_key(reason_var) {
+                    add_proof(inner, rb)?;
+                }
                 let proof = inner.mapping[reason_var];
                 rb.insert(inner.uf_table, &[l, r, inner.next_ts(), proof])
                     .context("union")

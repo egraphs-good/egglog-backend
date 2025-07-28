@@ -118,6 +118,11 @@ impl<K: NumericId, V> DenseIdMap<K, V> {
         res
     }
 
+    /// Test whether `key` is set in this map.
+    pub fn contains_key(&self, key: K) -> bool {
+        self.data.get(key.index()).is_some_and(Option::is_some)
+    }
+
     /// Get the current mapping for `key` in the table.
     pub fn get(&self, key: K) -> Option<&V> {
         self.data.get(key.index())?.as_ref()

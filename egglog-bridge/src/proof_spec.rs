@@ -11,7 +11,7 @@ use crate::{
     new_syntax::{RuleData2, SourceSyntax},
     rule::{AtomId, Bindings, DstVar, Variable},
     syntax::{Binding, RuleRepresentation, TermFragment},
-    term_proof_dag::{BaseValueConstant, EqProof, EqReason, RuleTarget, TermProof, TermValue},
+    term_proof_dag::{BaseValueConstant, EqProof, EqReason, TermProof, TermValue},
     ColumnTy, EGraph, FunctionId, GetFirstMatch, QueryEntry, Result, RuleId, SideChannel,
 };
 
@@ -23,7 +23,6 @@ define_id!(pub(crate) ReasonSpecId, u32, "A unique identifier for the step in a 
 ///
 #[derive(Debug)]
 pub(crate) enum ProofReason {
-    Rule(RuleData),
     Rule2(RuleData2),
     /// Congrence reasons contain the "old" term id that the new term is equal
     /// to. Pairwise equalty proofs are rebuilt at proof reconstruction time.
@@ -34,77 +33,15 @@ pub(crate) enum ProofReason {
     },
 }
 
-#[derive(Copy, Clone, Debug)]
-pub(crate) enum CaonicalIdRef {
-    Mapped(usize),
-    WithinAtom { atom: AtomIndex, proj: usize },
-}
-
-#[derive(Debug)]
-pub(crate) struct RuleData {
-    rule_id: RuleId,
-    desc: Arc<str>,
-    insert_to: Insertable,
-    /// The atoms on the LHS of the rule.
-    lhs_atoms: Vec<Vec<QueryEntry>>,
-    /// Any atoms implicitly introduced in the RHS of the rule, before `dst_atom`.
-    rhs_atoms: Vec<Vec<QueryEntry>>,
-    /// The Atom this is a proof of
-    dst_atom: Vec<QueryEntry>,
-
-    /// Rule-based proofs include a set of "canonical" ids that are used to
-    /// ground other terms in the rest of the match. For example, if a rule
-    /// looks like:
-    ///
-    /// > (= x (add a b))
-    /// > (= x (mul a 2))
-    /// > =>
-    /// > (f x)
-    ///
-    /// It's possible that the underlying term reconstructed for `(f x)` will
-    /// look like either `(add a b)`, or `(mul a 2)`, or something else entirely
-    /// (`(add b a)`, say).
-    ///
-    /// These canonical ids are recorded in the RuleData to guide generation of
-    /// equality proofs.
-    n_canonical: usize,
-    canonical_mapping: HashMap<AtomIndex, CaonicalIdRef>,
-    /// The number of LHS bindings in scope for this insertion.
-    lhs_bindings: usize,
-    /// The number of RHS bindings in scope for this insertion.
-    rhs_bindings: usize,
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub enum AtomIndex {
-    Lhs(usize),
-    Rhs(usize),
-}
-
 impl ProofReason {
     pub(crate) fn arity(&self) -> usize {
         // All start with a proof spec id.
         1 + match self {
-            ProofReason::Rule(RuleData {
-                lhs_atoms,
-                rhs_atoms,
-                n_canonical,
-                ..
-            }) => *n_canonical + lhs_atoms.len() + rhs_atoms.len(),
             ProofReason::CongRow => 1,
             ProofReason::Rule2(data) => data.n_vars(),
             ProofReason::Fiat { .. } => 0,
         }
     }
-}
-
-/// The sort of insertion that an existence proof may correspond to.
-#[derive(Debug, Copy, Clone)]
-pub(crate) enum Insertable {
-    /// An insertion into a function / table.
-    Func(FunctionId),
-    /// An egglog `union`.
-    UnionFind,
 }
 
 pub(crate) type SyntaxEnv = HashMap<Variable, Arc<TermFragment<Variable>>>;
@@ -170,70 +107,6 @@ impl ProofBuilder {
         self.rhs_term_vars.push(term_var);
     }
 
-    fn canonical_mappings(&self) -> (Vec<AtomIndex>, HashMap<AtomIndex, CaonicalIdRef>) {
-        let mut result = HashMap::new();
-        let mut atoms_to_materialize = Vec::new();
-        #[derive(Default)]
-        struct VariableMention {
-            as_term: Vec<AtomIndex>,
-            as_subterm: Vec<(AtomIndex, usize)>,
-        }
-        impl VariableMention {
-            fn update_term(&mut self, ix: AtomIndex) {
-                self.as_term.push(ix);
-            }
-            fn update_subterm(&mut self, ix: AtomIndex, proj: usize) {
-                self.as_subterm.push((ix, proj));
-            }
-        }
-        let mut mapping = HashMap::<Variable, VariableMention>::new();
-        for (atom_ix, atom) in self
-            .lhs_atoms
-            .iter()
-            .enumerate()
-            .map(|(ix, atom)| (AtomIndex::Lhs(ix), atom))
-            .chain(
-                self.rhs_atoms
-                    .iter()
-                    .enumerate()
-                    .map(|(ix, atom)| (AtomIndex::Rhs(ix), atom)),
-            )
-        {
-            mapping
-                .entry(atom.last().unwrap().var())
-                .or_default()
-                .update_term(atom_ix);
-            for (col, entry) in atom[..atom.len() - 1].iter().enumerate() {
-                let QueryEntry::Var { id, .. } = entry else {
-                    continue;
-                };
-                mapping.entry(*id).or_default().update_subterm(atom_ix, col);
-            }
-        }
-        for (_, mentions) in mapping {
-            let Some(first_term_atom) = mentions.as_term.first().copied() else {
-                // If the only mentions for a variable are as a subterm, then
-                // there's nothing to do.
-                continue;
-            };
-            let id_ref = if let Some((atom, proj)) = mentions.as_subterm.first().copied() {
-                // If we have a subterm-level reference, we can reuse that to
-                // find the id. No need to write it in the canonical id mapping.
-                CaonicalIdRef::WithinAtom { atom, proj }
-            } else {
-                // We need to instantiate a new canonical id for this one, it is
-                // only referenced by "term heads".
-                let next_id = atoms_to_materialize.len();
-                atoms_to_materialize.push(first_term_atom);
-                CaonicalIdRef::Mapped(next_id)
-            };
-            for term_ref in &mentions.as_term {
-                result.insert(*term_ref, id_ref);
-            }
-        }
-        (atoms_to_materialize, result)
-    }
-
     /// Generate a proof for a newly rebuilt row.
     pub(crate) fn rebuild_proof(
         &mut self,
@@ -276,70 +149,24 @@ impl ProofBuilder {
         }
     }
 
-    fn make_reason(
+    /// Construct a reason associated with this rule and bind it to `reason_var`.
+    pub(crate) fn make_reason(
         &mut self,
-        insert_to: Insertable,
-        dst_atom: &[QueryEntry],
         reason_var: Variable,
         db: &mut EGraph,
     ) -> impl Fn(&mut Bindings, &mut RuleBuilder) -> Result<()> + Clone {
-        // NB: we could cache these.
-        let (to_materialize, canonical_mapping) = self.canonical_mappings();
-        let spec = Arc::new(ProofReason::Rule(RuleData {
-            desc: self.rule_description.clone(),
-            insert_to,
-            rule_id: self.rule_id,
-            lhs_atoms: self.lhs_atoms.clone(),
-            rhs_atoms: self.rhs_atoms.clone(),
-            n_canonical: to_materialize.len(),
-            canonical_mapping,
-            dst_atom: dst_atom.to_vec(),
-            lhs_bindings: self.syntax.lhs_bindings.len(),
-            rhs_bindings: self.syntax.rhs_bindings.len(),
-        }));
-        let spec_table = db.reason_table(&spec);
-        let spec_id = db.proof_specs.push(spec);
-        let proof_vars: Vec<Variable> = to_materialize
-            .iter()
-            .map(|atom_ix| match atom_ix {
-                AtomIndex::Lhs(ix) => self.lhs_atoms[*ix].last().unwrap().var(),
-                AtomIndex::Rhs(ix) => self.rhs_atoms[*ix].last().unwrap().var(),
-            })
-            .chain(
-                self.lhs_term_vars
-                    .iter()
-                    .copied()
-                    .chain(self.rhs_term_vars.iter().copied()),
-            )
-            .collect();
-        let reason_counter = db.reason_counter;
-        move |inner, rb| {
-            let mut args = Vec::with_capacity(proof_vars.len() + 1);
-            args.push(Value::new(spec_id.rep()).into());
-            for var in &proof_vars {
-                args.push(inner.mapping[*var]);
-            }
-            let x = rb.lookup_or_insert(
-                spec_table,
-                &args,
-                &[reason_counter.into()],
-                ColumnId::from_usize(args.len()),
-            )?;
-            inner.mapping.insert(reason_var, x.into());
+        // TODO: cache?
+        let syntax = self
+            .source_syntax
+            .as_ref()
+            .cloned()
+            .expect("must specify syntax when proofs are enabled");
+        let cb = self.create_reason(syntax, db);
+        move |bndgs, rb| {
+            let res = cb(bndgs, rb)?;
+            bndgs.mapping.insert(reason_var, res.into());
             Ok(())
         }
-    }
-
-    /// Generate a callback that will add a proof reason to the database and
-    /// bind a pointer to that reason to `reason_var`.
-    pub(crate) fn union(
-        &mut self,
-        l: QueryEntry,
-        r: QueryEntry,
-        reason_var: Variable,
-        db: &mut EGraph,
-    ) -> impl Fn(&mut Bindings, &mut RuleBuilder) -> Result<()> + Clone {
-        self.make_reason(Insertable::UnionFind, &[l, r], reason_var, db)
     }
 
     /// Generate a callback that will add a row to the term database, as well as
@@ -352,7 +179,7 @@ impl ProofBuilder {
         reason_var: Variable,
         db: &mut EGraph,
     ) -> impl Fn(&mut Bindings, &mut RuleBuilder) -> Result<()> + Clone {
-        let make_reason = self.make_reason(Insertable::Func(func), &entries, reason_var, db);
+        let make_reason = self.make_reason(reason_var, db);
         self.add_rhs(&entries, term_var);
         let func_table = db.funcs[func].table;
         let term_table = db.term_table(func_table);
@@ -373,7 +200,9 @@ impl ProofBuilder {
             syntax: rhs_term,
         });
         move |inner, rb| {
-            make_reason(inner, rb)?;
+            if !inner.mapping.contains_key(reason_var) {
+                make_reason(inner, rb)?;
+            }
             let mut translated = Vec::new();
             translated.push(func_val.into());
             for entry in &entries[0..entries.len() - 1] {
@@ -491,9 +320,6 @@ impl EGraph {
         let reason_row = self.get_reason(reason);
         let spec = self.proof_specs[ReasonSpecId::new(reason_row[0].rep())].clone();
         let res = match &*spec {
-            ProofReason::Rule(data) => {
-                self.create_rule_proof(data, &term_row[1..term_row.len() - 2], &reason_row, state)
-            }
             ProofReason::Rule2(data) => {
                 let todo_fill_in = 1;
                 todo!()
@@ -636,89 +462,6 @@ impl EGraph {
         row[col + 1]
     }
 
-    fn create_rule_proof(
-        &mut self,
-        data: &RuleData,
-        trunc_term_row: &[Value],
-        reason_row: &[Value],
-        state: &mut ProofReconstructionState,
-    ) -> Rc<TermProof> {
-        let RuleData {
-            desc,
-            insert_to,
-            lhs_atoms,
-            rhs_atoms,
-            rule_id,
-            dst_atom,
-            n_canonical,
-            canonical_mapping,
-            lhs_bindings,
-            rhs_bindings,
-        } = data;
-        let rule_desc = desc.clone();
-        let atom_desc: Rc<str> = format!("{dst_atom:?}").into();
-        let (func_id, func, schema) = match insert_to {
-            Insertable::Func(f) => (
-                RuleTarget::Row(
-                    *f,
-                    Rc::new(TermFragment::App(
-                        *f,
-                        dst_atom[0..dst_atom.len() - 1]
-                            .iter()
-                            .map(|entry| entry.to_syntax(self).unwrap())
-                            .collect(),
-                    )),
-                ),
-                self.funcs[*f].name.clone(),
-                self.funcs[*f].schema.clone(),
-            ),
-            Insertable::UnionFind => (
-                RuleTarget::Union,
-                "union".into(),
-                vec![ColumnTy::Id, ColumnTy::Id],
-            ),
-        };
-        let row: Vec<_> = self.get_term_values(trunc_term_row.iter().zip(schema.iter()), state);
-        let prem_term_ids = &reason_row[1 + *n_canonical..reason_row.len() - 1];
-        let premises: Vec<_> = reason_row[1 + *n_canonical..reason_row.len() - 1]
-            .iter()
-            .map(|prem| self.explain_term_inner(*prem, state))
-            .collect();
-        let get_premise = |ix: AtomIndex| match ix {
-            AtomIndex::Lhs(ix) => prem_term_ids[ix],
-            AtomIndex::Rhs(ix) => prem_term_ids[lhs_atoms.len() + ix],
-        };
-        let premises_eq: Vec<Rc<EqProof>> = (0..lhs_atoms.len())
-            .map(AtomIndex::Lhs)
-            .chain((0..rhs_atoms.len()).map(AtomIndex::Rhs))
-            .map(|atom_ix| match canonical_mapping[&atom_ix] {
-                CaonicalIdRef::Mapped(i) => {
-                    let l = reason_row[1 + i];
-                    let r = get_premise(atom_ix);
-                    self.explain_terms_equal_inner(l, r, state)
-                }
-                CaonicalIdRef::WithinAtom { atom, proj } => {
-                    let atom_id = get_premise(atom);
-                    let l = self.project_value(atom_id, proj);
-                    let r = get_premise(atom_ix);
-                    self.explain_terms_equal_inner(l, r, state)
-                }
-            })
-            .collect();
-        Rc::new(TermProof::FromRule {
-            rule_id: *rule_id,
-            func_id,
-            rule_desc,
-            atom_desc,
-            func,
-            row,
-            premises,
-            premises_eq,
-            lhs_atoms: *lhs_bindings,
-            rhs_atoms: *rhs_bindings,
-        })
-    }
-
     fn create_eq_proof_step(
         &mut self,
         reason_id: Value,
@@ -730,15 +473,6 @@ impl EGraph {
         let spec = self.proof_specs[ReasonSpecId::new(reason_row[0].rep())].clone();
         let l_term = self.explain_term_inner(l, state);
         match &*spec {
-            ProofReason::Rule(data) => {
-                assert!(
-                    matches!(data.insert_to, Insertable::UnionFind),
-                    "non-UF insertion being used to explain equality"
-                );
-                let r_term = self.explain_term_inner(r, state);
-                let term_proof = self.create_rule_proof(data, &[l, r], &reason_row, state);
-                state.base(term_proof, l_term, r_term)
-            }
             ProofReason::Rule2(data) => {
                 let todo_fill_in = 1;
                 todo!()

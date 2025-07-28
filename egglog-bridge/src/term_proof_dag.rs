@@ -1,9 +1,7 @@
-use anyhow::Context;
-use core_relations::{BaseValueId, BaseValuePrinter, Value};
+use core_relations::{BaseValueId, Value};
 use thiserror::Error;
 
 use std::{
-    collections::BTreeMap,
     fmt,
     io::{self, Write},
     rc::Rc,
@@ -12,25 +10,12 @@ use std::{
 
 use hashbrown::{hash_map::Entry, HashMap};
 
-use crate::{
-    rule::Variable,
-    syntax::{Binding, Entry as SyntaxEntry, Statement, TermFragment},
-    ColumnTy, EGraph, FunctionId, Result, RuleId,
-};
+use crate::{new_syntax::RuleData2, rule::Variable, syntax::TermFragment, FunctionId, Result};
 
 #[derive(Debug)]
 pub enum TermValue<Prf> {
     Base(BaseValueConstant),
     SubTerm(Rc<Prf>),
-}
-
-impl<Prf> TermValue<Prf> {
-    fn get_subterm(&self) -> Option<&Prf> {
-        match self {
-            TermValue::Base(_) => None,
-            TermValue::SubTerm(subterm) => Some(subterm),
-        }
-    }
 }
 
 impl<Prf> Clone for TermValue<Prf> {
@@ -83,17 +68,13 @@ pub enum TermProof {
 
     /// A proof of the existence of a term by applying a rule to the databse.
     FromRule {
-        rule_id: RuleId,
-        lhs_atoms: usize,
-        rhs_atoms: usize,
-        rule_desc: Arc<str>,
-        atom_desc: Rc<str>,
-        func: Arc<str>,
-        // NB: "none" means that this is a non-function, like "union".
-        func_id: RuleTarget,
-        row: Vec<TermValue<TermProof>>,
-        premises: Vec<Rc<TermProof>>,
-        premises_eq: Vec<Rc<EqProof>>,
+        rule_data: RuleData2,
+        /// There's one [`TermValue`] for every [`TopLevelLhsExpr`] in the syntax stored in
+        /// `rule_data`.
+        ///
+        /// [`TopLevelLhsExpr`]: crate::new_syntax::TopLevelLhsExpr
+        premises: Vec<TermValue<TermProof>>,
+        final_term: Rc<Term>,
     },
 }
 
@@ -105,30 +86,10 @@ impl fmt::Debug for TermProof {
         match self {
             TermProof::Cong { func, .. } => write!(f, "(cong {func} ...)"),
             TermProof::Fiat { desc, func, .. } => write!(f, "(fiat {desc} ({func} ... ))"),
-            TermProof::FromRule {
-                func,
-                rule_desc,
-                rule_id,
-                ..
-            } => {
-                write!(f, "({rule_id:?} / {rule_desc} => ({func} ...))")
+            TermProof::FromRule { rule_data, .. } => {
+                write!(f, "(from rule {rule_data:?} ...)")
             }
         }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub enum RuleTarget {
-    Union,
-    Row(FunctionId, Rc<TermFragment<Variable>>),
-}
-
-impl RuleTarget {
-    fn func_id(&self) -> FunctionId {
-        let RuleTarget::Row(id, _) = self else {
-            panic!("attempting to get func_id from non-row target")
-        };
-        *id
     }
 }
 
@@ -212,41 +173,11 @@ impl Printer {
                 writeln!(writer, "{prefix}Fiat {{ {desc}, ({func} {term}) }}")?;
             }
             TermProof::FromRule {
-                rule_desc,
-                atom_desc,
-                func,
-                row,
+                rule_data,
                 premises,
-                premises_eq,
-                ..
+                final_term,
             } => {
-                let premises = DisplayList(
-                    try_collect(
-                        premises
-                            .iter()
-                            .map(|p| self.get_term_id(p.as_ref(), writer)),
-                    )?,
-                    " ",
-                );
-                let premises_eq = DisplayList(
-                    try_collect(
-                        premises_eq
-                            .iter()
-                            .map(|p| self.get_eq_id(p.as_ref(), writer)),
-                    )?,
-                    " ",
-                );
-                let row = DisplayList(
-                    try_collect(row.iter().map(|t| match t {
-                        TermValue::Base(s) => Ok(format!("{s}")),
-                        TermValue::SubTerm(subterm) => self.get_term_id(subterm.as_ref(), writer),
-                    }))?,
-                    " ",
-                );
-                writeln!(
-                    writer,
-                    "{prefix}FromRule {{\n\trule: {rule_desc}\n\tatom: {atom_desc}\n\t({func} {row})\n\tpremises: {premises}\n\tpremises_eq: {premises_eq}\n}}"
-                )?;
+                todo!()
             }
         }
         Ok(())
@@ -346,7 +277,7 @@ impl TermEnv {
         if let Some(term) = self.terms.get(&by_ptr) {
             return term.clone();
         }
-        let term = match by_ptr.0.as_ref() {
+        let res = match by_ptr.0.as_ref() {
             TermProof::Cong {
                 func,
                 pairwise_eq,
@@ -357,15 +288,15 @@ impl TermEnv {
                     TermValue::Base(p) => Rc::new(Term::Base(p.clone())),
                     TermValue::SubTerm(eq) => self.get_term(eq.rhs.clone()),
                 }));
-                Term::Expr {
+                Rc::new(Term::Expr {
                     func_id: *func_id,
                     func: func.clone(),
                     subterms: new_subterms,
-                }
+                })
             }
             TermProof::Fiat {
                 func_id, func, row, ..
-            } => Term::Expr {
+            } => Rc::new(Term::Expr {
                 func_id: *func_id,
                 func: func.clone(),
                 subterms: row
@@ -375,22 +306,9 @@ impl TermEnv {
                         TermValue::SubTerm(rc) => self.get_term(rc.clone()),
                     })
                     .collect(),
-            },
-            TermProof::FromRule {
-                func_id, func, row, ..
-            } => Term::Expr {
-                func_id: func_id.func_id(),
-                func: func.clone(),
-                subterms: row
-                    .iter()
-                    .map(|t| match t {
-                        TermValue::Base(p) => Rc::new(Term::Base(p.clone())),
-                        TermValue::SubTerm(rc) => self.get_term(rc.clone()),
-                    })
-                    .collect(),
-            },
+            }),
+            TermProof::FromRule { final_term, .. } => final_term.clone(),
         };
-        let res = Rc::new(term);
         self.terms.insert(by_ptr, res.clone());
         res
     }
@@ -471,534 +389,6 @@ impl fmt::Display for Term {
                 write!(f, ")")
             }
         }
-    }
-}
-
-impl EGraph {
-    /// Check the validity of the given term proof.
-    ///
-    // The need to pass an `Rc` here is a bit annoying. It's downstream of our
-    // memoization strategy, which holds onto references for keys (via ByPtr
-    // instead of *const or usize) for added safety when recyclic term
-    // pointers.
-    pub fn check_term_proof(&mut self, proof: Rc<TermProof>) -> Result<()> {
-        self.check_term_proof_impl(proof, &mut Default::default())
-    }
-
-    /// Check the validity of the given equality proof.
-    pub fn check_eq_proof(&mut self, proof: &EqProof) -> Result<()> {
-        self.check_eq_proof_impl(proof, &mut Default::default())
-    }
-
-    fn check_term_proof_impl(
-        &mut self,
-        proof: Rc<TermProof>,
-        term_env: &mut TermEnv,
-    ) -> Result<()> {
-        if term_env.start_check(&proof)? {
-            return Ok(());
-        }
-        match proof.as_ref() {
-            TermProof::Cong {
-                old_term,
-                pairwise_eq,
-                ..
-            } => {
-                self.check_term_proof_impl(old_term.clone(), term_env)?;
-                pairwise_eq
-                    .iter()
-                    .filter_map(TermValue::get_subterm)
-                    .try_for_each(|eq| self.check_eq_proof_impl(eq, term_env))
-            }
-            TermProof::Fiat { .. } => {
-                // NB: we should allow users to validate any instances of
-                // `Fiat`; otherwise it's a way to cheat.
-                Ok(())
-            }
-            TermProof::FromRule {
-                rule_id,
-                func,
-                func_id,
-                row,
-                premises_eq,
-                premises,
-                lhs_atoms,
-                rhs_atoms,
-                ..
-            } => {
-                // First: Check the eq proofs and auxiliary proofs.
-                // NB: do we not need premises anymore? premises_eq seems to
-                // have everything we need.
-                premises_eq
-                    .iter()
-                    .try_for_each(|eq| self.check_eq_proof_impl(eq, term_env))?;
-                let rule_info = &self.rules[*rule_id];
-                let syntax = rule_info.syntax.clone();
-                let mut sub = Substitution {
-                    mapping: Default::default(),
-                    egraph: self,
-                };
-
-                // Contains a mapping from the canonical representative of a
-                // variable back to the terms that we proved equal to it in the
-                // grounding process. See the `RuleTarget::Union` branch below
-                // for what this is about.
-                let mut reverse_canon_mapping = BTreeMap::<Rc<Term>, Vec<Rc<Term>>>::new();
-                // Process the LHS and RHS atoms
-                for (binding, prf) in syntax.lhs_bindings[0..*lhs_atoms]
-                    .iter()
-                    .chain(&syntax.rhs_bindings[0..*rhs_atoms])
-                    .zip(premises_eq.iter())
-                {
-                    let lhs_term = term_env.get_term(prf.lhs.clone());
-                    let rhs_term = term_env.get_term(prf.rhs.clone());
-                    reverse_canon_mapping
-                        .entry(lhs_term.clone())
-                        .or_default()
-                        .push(rhs_term.clone());
-                    sub.process_binding(&lhs_term, &rhs_term, binding)
-                        .with_context(|| {
-                            anyhow::format_err!(
-                                "rule_id={rule_id:?}\nlhs-bindings={lbdgs:?}\nrhs-bindings={rbdgs:?}\ncur={binding:?}\nsub=\n\t{sub}: ",
-                                lbdgs=&syntax.lhs_bindings[0..*lhs_atoms],
-                                rbdgs=&syntax.rhs_bindings[0..*rhs_atoms],
-                                sub=DisplayList(
-                                    sub.mapping
-                                        .iter()
-                                        .map(|(var, term)| format!("{var:?} => {term}"))
-                                        .collect(),
-                                    "\n\t"
-                                )
-                            )
-                        })?;
-                }
-
-                // Now we're ready to try reconstructing the term. The next step
-                // here depends on what kind of insertion we're doing.
-                match func_id {
-                    RuleTarget::Union => {
-                        let mut found = false;
-                        let expected_l = term_env.get_term_from_val(&row[0]);
-                        let expected_r = term_env.get_term_from_val(&row[1]);
-                        for stmt in &syntax.statements {
-                            sub.run_stmt(stmt, |l, r| {
-                                // The union-find proofs behave a bit like row
-                                // insertions into the database (hence why much
-                                // of the preceeding code was shared).
-                                //
-                                // There is a difference, though. UF proofs
-                                // operate on term ids rather canonical ids. As
-                                // such, we need to do a search over the terms
-                                // bound to a variable when checking the LHS and
-                                // RHS of the union.
-                                let Some(other_l) = reverse_canon_mapping.get(l) else {
-                                    return;
-                                };
-                                let Some(other_r) = reverse_canon_mapping.get(r) else {
-                                    return;
-                                };
-                                for got_l in other_l {
-                                    for got_r in other_r {
-                                        found |= got_l == &expected_l && got_r == &expected_r;
-                                    }
-                                }
-                            })?;
-                        }
-                        if !found {
-                            return Err(anyhow::Error::from(ProofCheckError::TermsNotUnioned {
-                                lhs: format!("{expected_l}"),
-                                rhs: format!("{expected_r}"),
-                            }))
-                            .with_context(|| {
-                                // Big error here for now. This is where we can have a lot of trouble.
-                                anyhow::format_err!(
-                                    "rule_id={rule_id:?}, row=({func} {})\n\t=premises=\n\t{}\n\t=eqs=\n\t{}\n\tsubst=\n\t{}",
-                                    DisplayList(
-                                        row.iter()
-                                            .map(|x| term_env.get_term_from_val(x).to_string())
-                                            .collect(),
-                                        " "
-                                    ),
-                                    DisplayList(
-                                        premises
-                                            .iter()
-                                            .map(|x| term_env.get_term(x.clone()).to_string())
-                                            .collect(),
-                                        "\n\t"
-                                    ),
-                                    DisplayList(
-                                        premises_eq
-                                            .iter()
-                                            .map(|x| {
-                                                format!(
-                                                    "{} = {}",
-                                                    term_env.get_term(x.lhs.clone()),
-                                                    term_env.get_term(x.rhs.clone())
-                                                )
-                                            })
-                                            .collect(),
-                                        "\n\t"
-                                    ),
-                                    DisplayList(
-                                        sub.mapping
-                                            .iter()
-                                            .map(|(var, term)| format!("{var:?} => {term}"))
-                                            .collect(),
-                                        "\n\t"
-                                    )
-                                )
-                            });
-                        }
-                    }
-                    RuleTarget::Row(_, fragment) => {
-                        let expected = term_env.get_term(proof.clone());
-                        let mut found = false;
-                        sub.construct_term(fragment, &mut |term| found |= term == &*expected)?;
-                        if !found {
-                            return Err(ProofCheckError::TermNotConstructed {
-                                term: format!("{expected}"),
-                            }
-                            .into());
-                        }
-                    }
-                }
-                Ok(())
-            }
-        }?;
-        term_env.finish_check(&proof);
-        Ok(())
-    }
-
-    fn check_eq_proof_impl(&mut self, eq_proof: &EqProof, term_env: &mut TermEnv) -> Result<()> {
-        if term_env.start_check(eq_proof)? {
-            return Ok(());
-        }
-        let EqProof { lhs, rhs, reason } = eq_proof;
-        match reason {
-            EqReason::Id(term) => {
-                self.check_term_proof_impl(term.clone(), term_env)?;
-                let got = term_env.get_term(term.clone());
-                let lhs = term_env.get_term(lhs.clone());
-                let rhs = term_env.get_term(rhs.clone());
-                if got != lhs || got != rhs || rhs != lhs {
-                    return Err(ProofCheckError::IdProofTermDisagreement {
-                        proof: format!("{got:?}"),
-                        lhs: format!("{lhs:?}"),
-                        rhs: format!("{rhs:?}"),
-                    }
-                    .into());
-                }
-            }
-            EqReason::Base(proof) => {
-                match proof.as_ref() {
-                    TermProof::FromRule {
-                        func_id: RuleTarget::Union,
-                        row,
-                        ..
-                    } => {
-                        // Ensure that the terms in the union are equal to the endpoints.
-                        let l_expected = term_env.get_term_from_val(&row[0]);
-                        let r_expected = term_env.get_term_from_val(&row[1]);
-                        let lhs_term = term_env.get_term(lhs.clone());
-                        let rhs_term = term_env.get_term(rhs.clone());
-                        if l_expected != lhs_term || r_expected != rhs_term {
-                            return Err(ProofCheckError::MisalignedUnion {
-                                lhs_expected: format!("{l_expected}"),
-                                lhs_actual: format!("{lhs_term}"),
-                                rhs_expected: format!("{r_expected}"),
-                                rhs_actual: format!("{rhs_term}"),
-                            }
-                            .into());
-                        }
-                        // Then check the underlying proof.
-                        self.check_term_proof_impl(proof.clone(), term_env)?;
-                    }
-                    TermProof::Cong {
-                        old_term,
-                        pairwise_eq,
-                        ..
-                    } => {
-                        // First, check all the pairwise equality proofs.
-                        pairwise_eq.iter().try_for_each(|eq| {
-                            let TermValue::SubTerm(eq) = eq else {
-                                return Ok(());
-                            };
-                            self.check_eq_proof_impl(eq, term_env)
-                        })?;
-                        let old = term_env.get_term(old_term.clone());
-                        let new = term_env.get_term(proof.clone());
-                        let lhs = term_env.get_term(lhs.clone());
-                        let rhs = term_env.get_term(rhs.clone());
-                        if lhs != old || rhs != new {
-                            return Err(anyhow::Error::from(ProofCheckError::MisalignedUnion {
-                                lhs_expected: format!("{lhs}"),
-                                lhs_actual: format!("{old}"),
-                                rhs_expected: format!("{rhs}"),
-                                rhs_actual: format!("{new}"),
-                            }))
-                            .with_context(|| {
-                                anyhow::format_err!(
-                                    "during congruence rule {proof:?}, {pairwise_eq:?}"
-                                )
-                            });
-                        }
-                    }
-                    _ => {
-                        return Err(ProofCheckError::NonUnionProofOfEquality {
-                            rule: format!("{proof:?}"),
-                        }
-                        .into())
-                    }
-                }
-            }
-            EqReason::Backwards(eq) => {
-                self.check_eq_proof_impl(eq, term_env)?;
-                let outer_lhs = term_env.get_term(lhs.clone());
-                let inner_lhs = term_env.get_term(eq.lhs.clone());
-                let outer_rhs = term_env.get_term(rhs.clone());
-                let inner_rhs = term_env.get_term(eq.rhs.clone());
-                if outer_lhs != inner_rhs {
-                    return Err(ProofCheckError::BackwardEndpointMismatch {
-                        x: format!("{outer_lhs:?}"),
-                        y: format!("{inner_rhs:?}"),
-                    }
-                    .into());
-                }
-
-                if outer_rhs != inner_lhs {
-                    return Err(ProofCheckError::BackwardEndpointMismatch {
-                        x: format!("{outer_rhs:?}"),
-                        y: format!("{inner_lhs:?}"),
-                    }
-                    .into());
-                }
-            }
-            EqReason::Trans(vec) => {
-                // Check each component eq proof.
-                vec.iter()
-                    .try_for_each(|eq| self.check_eq_proof_impl(eq, term_env))?;
-                for (x, y) in vec.iter().zip(vec.iter().skip(1)) {
-                    let lhs_term = term_env.get_term(x.rhs.clone());
-                    let rhs_term = term_env.get_term(y.lhs.clone());
-                    if lhs_term != rhs_term {
-                        return Err(anyhow::Error::from(
-                            ProofCheckError::TransitiveEndpointMismatch {
-                                x: format!("{lhs_term}"),
-                                y: format!("{rhs_term}"),
-                            },
-                        ))
-                        .with_context(|| anyhow::format_err!("{x:?} vs.\n{y:?}"));
-                    }
-                }
-            }
-        };
-        term_env.finish_check(eq_proof);
-        Ok(())
-    }
-}
-
-struct Substitution<'a> {
-    // TODO: we should be able to reuse the allocations here for really large proofs.
-    mapping: HashMap<Variable, Rc<Term>>,
-    egraph: &'a mut EGraph,
-}
-
-impl Substitution<'_> {
-    fn process_binding(
-        &mut self,
-        canon: &Rc<Term>,
-        term: &Rc<Term>,
-        binding: &Binding,
-    ) -> Result<()> {
-        self.bind_variables_to_entry(canon, &SyntaxEntry::Placeholder(binding.var))?;
-        self.bind_variables(term, &binding.syntax)
-    }
-
-    /// Find terms mapped to by the given TermFragment pattern, if possible.
-    fn bind_variables(&mut self, term: &Rc<Term>, pat: &TermFragment<Variable>) -> Result<()> {
-        match (term.as_ref(), pat) {
-            (
-                Term::Expr {
-                    func_id,
-                    func,
-                    subterms,
-                },
-                TermFragment::App(syntax_func, vec),
-            ) => {
-                if func_id != syntax_func {
-                    return Err(ProofCheckError::PatternFunctionMismatch {
-                        func1: func.as_ref().into(),
-                        func2: self.egraph.funcs[*syntax_func].name.as_ref().into(),
-                    }
-                    .into());
-                }
-                // Low-level invariants. If these assertiosn fail then something
-                // has gone very wrong. If this is a salient error that comes up
-                // a lot, we could upgrade it to a ProofCheckError.
-                assert_eq!(subterms.len(), vec.len());
-                assert_eq!(subterms.len(), self.egraph.funcs[*func_id].schema.len() - 1);
-                subterms
-                    .iter()
-                    .zip(vec.iter())
-                    .try_for_each(|(t, p)| self.bind_variables_to_entry(t, p))?;
-            }
-
-            _ => {
-                return Err(ProofCheckError::PatternVariantMismatch {
-                    pat: format!("{pat:?}"),
-                    term: format!("{term}"),
-                }
-                .into())
-            }
-        };
-        Ok(())
-    }
-
-    fn bind_variables_to_entry(
-        &mut self,
-        term: &Rc<Term>,
-        entry: &SyntaxEntry<Variable>,
-    ) -> Result<()> {
-        match (term.as_ref(), entry) {
-            (Term::Base(p1), SyntaxEntry::Const(p2)) => {
-                if p1 != p2 {
-                    return Err(ProofCheckError::MismatchedConstants {
-                        p1: p1.rendered.as_ref().into(),
-                        p2: p2.rendered.as_ref().into(),
-                    }
-                    .into());
-                }
-            }
-            (_, SyntaxEntry::Placeholder(var)) => {
-                if let Some(prev) = self.mapping.insert(*var, term.clone()) {
-                    if &prev != term {
-                        return Err(ProofCheckError::UnificationFailure {
-                            var: *var,
-                            t1: format!("{prev}"),
-                            t2: format!("{term}"),
-                        }
-                        .into());
-                    }
-                }
-            }
-            (_, SyntaxEntry::Const(..)) => {
-                return Err(ProofCheckError::PatternVariantMismatch {
-                    pat: format!("{entry:?}"),
-                    term: format!("{term}"),
-                }
-                .into())
-            }
-        };
-        Ok(())
-    }
-
-    fn run_stmt(
-        &mut self,
-        stmt: &Statement<Variable>,
-        mut on_union: impl FnMut(&Term, &Term),
-    ) -> Result<()> {
-        match stmt {
-            Statement::AssertEq(l, r) => {
-                let l = self.construct_term_from_entry(l)?;
-                let r = self.construct_term_from_entry(r)?;
-                if l != r {
-                    Err(ProofCheckError::AssertEqFailure {
-                        lhs: format!("{l}"),
-                        rhs: format!("{r}"),
-                    }
-                    .into())
-                } else {
-                    Ok(())
-                }
-            }
-            Statement::Union(l, r) => {
-                let l = self.construct_term_from_entry(l)?;
-                let r = self.construct_term_from_entry(r)?;
-                on_union(&l, &r);
-                Ok(())
-            }
-        }
-    }
-
-    fn construct_term_from_entry(&mut self, entry: &SyntaxEntry<Variable>) -> Result<Rc<Term>> {
-        match entry {
-            SyntaxEntry::Placeholder(v) => self.lookup_var(*v),
-            SyntaxEntry::Const(c) => Ok(Rc::new(Term::Base(c.clone()))),
-        }
-    }
-
-    fn construct_term(
-        &mut self,
-        rule: &TermFragment<Variable>,
-        on_term: &mut impl FnMut(&Term),
-    ) -> Result<Rc<Term>> {
-        let result: Rc<Term> = match rule {
-            TermFragment::Prim(func, args, ty) => {
-                let ColumnTy::Base(ty) = *ty else {
-                    panic!("expected base value type, found {ty:?}");
-                };
-                // This is the hardest case but still fairly straight-forwad: we
-                // need to extract base values from `args`, then apply `func` to
-                // them.
-                let args = args
-                    .iter()
-                    .map(|p| {
-                        let term = self.construct_term_from_entry(p)?;
-                        let Term::Base(pc) = term.as_ref() else {
-                            return Err(ProofCheckError::NonBaseValueArg {
-                                arg: format!("{term}"),
-                            }
-                            .into());
-                        };
-                        Ok(pc.interned)
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                let result = self
-                    .egraph
-                    .db
-                    .with_execution_state(|exec_state| exec_state.call_external_func(*func, &args))
-                    // This should be a pretty rare error, but if we see it
-                    // often we can upgrade it to a full ProofCheckError.
-                    //
-                    // When primitives return None, they intend to halt
-                    // execution and not match a rule.
-                    .expect("primitive functions should return a value");
-
-                let rendered = format!(
-                    "{:?}",
-                    BaseValuePrinter {
-                        base: self.egraph.db.base_values_mut(),
-                        ty,
-                        val: result,
-                    }
-                );
-                Rc::new(Term::Base(BaseValueConstant {
-                    ty,
-                    interned: result,
-                    rendered: rendered.into(),
-                }))
-            }
-            TermFragment::App(func, args) => {
-                let args = args
-                    .iter()
-                    .map(|p| self.construct_term_from_entry(p))
-                    .collect::<Result<Vec<_>>>()?;
-                Rc::new(Term::Expr {
-                    func_id: *func,
-                    func: self.egraph.funcs[*func].name.clone(),
-                    subterms: args.clone(),
-                })
-            }
-        };
-        on_term(&result);
-        Ok(result)
-    }
-
-    fn lookup_var(&self, var: Variable) -> Result<Rc<Term>> {
-        self.mapping
-            .get(&var)
-            .cloned()
-            .ok_or(ProofCheckError::UnboundVariable { var }.into())
     }
 }
 
