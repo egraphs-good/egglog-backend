@@ -155,7 +155,6 @@ impl ProofBuilder {
         reason_var: Variable,
         db: &mut EGraph,
     ) -> impl Fn(&mut Bindings, &mut RuleBuilder) -> Result<()> + Clone {
-        // TODO: cache?
         let syntax = self
             .source_syntax
             .as_ref()

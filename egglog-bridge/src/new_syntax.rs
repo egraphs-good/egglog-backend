@@ -309,11 +309,15 @@ fn cong_term(args: &CongArgs, es: &mut ExecutionState, vals: &[Value]) -> Option
 }
 
 // Next steps to get to parity:
-// [ ] use the reason var in insertions / lookup-or-insert / union, rather than the old thign
+// [x] use the reason var in insertions / lookup-or-insert / union, rather than the old thign
 // [x] builder API for SourceSyntax
 // [ ] get rid of all unused warnings
 // [ ] proof reconstruction, but no checker
-// [ ] rip everything out
+//    [ ]  Figure out how "unions" work in FromRule (may want to mirror Oliver's format more
+//    closely)
+//    [ ]  Add a term, not term-proof memo to ProofReconstructionState and then use it.
+//
+// [x] rip everything out
 //
 // =====
 // What happens after parity?

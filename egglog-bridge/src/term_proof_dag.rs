@@ -10,7 +10,7 @@ use std::{
 
 use hashbrown::{hash_map::Entry, HashMap};
 
-use crate::{new_syntax::RuleData2, rule::Variable, syntax::TermFragment, FunctionId, Result};
+use crate::{new_syntax::RuleData2, rule::Variable, FunctionId, Result};
 
 #[derive(Debug)]
 pub enum TermValue<Prf> {
