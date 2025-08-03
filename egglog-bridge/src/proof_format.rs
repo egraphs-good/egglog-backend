@@ -22,8 +22,8 @@ pub struct PrettyPrintConfig {
 impl Default for PrettyPrintConfig {
     fn default() -> Self {
         Self {
-            line_width: 80,
-            indent_size: 2,
+            line_width: 512,
+            indent_size: 4,
         }
     }
 }
@@ -54,6 +54,7 @@ impl<'w, W: io::Write> PrettyPrinter<'w, W> {
     fn newline(&mut self) -> io::Result<()> {
         writeln!(self.writer)?;
         self.current_line_pos = 0;
+        self.write_indent()?;
         Ok(())
     }
 
@@ -123,7 +124,7 @@ impl TermDag {
                 }
             }
             Term::Func { id, args } => {
-                printer.write_str(&format!("({}", id.index()))?;
+                printer.write_str(&format!("({id:?}"))?;
                 if !args.is_empty() {
                     printer.increase_indent();
                     for (i, arg) in args.iter().enumerate() {
@@ -239,10 +240,14 @@ impl ProofStore {
             printer.write_with_break(" ")?;
             self.print_eq_proof_with_printer(*pf, printer)?;
         }
-        printer.decrease_indent();
         printer.write_with_break(") , old term exists by: ")?;
+        printer.increase_indent();
+        printer.newline()?;
         self.print_term_proof_with_printer(*pf_f_args_ok, printer)?;
-        printer.write_str(")")
+        printer.decrease_indent();
+        printer.write_str(")")?;
+        printer.decrease_indent();
+        Ok(())
     }
 
     /// Print the equality proof in a human-readable format to the given writer.
@@ -266,6 +271,7 @@ impl ProofStore {
             } => {
                 printer.write_str(&format!("PRule[Equality]({rule_name:?}, Subst {{"))?;
                 printer.increase_indent();
+                printer.newline()?;
                 for (i, (var, term)) in subst.iter().enumerate() {
                     if i > 0 {
                         printer.write_str(",")?;
@@ -273,9 +279,12 @@ impl ProofStore {
                     printer.write_with_break(" ")?;
                     printer.write_str(&format!("{var:?} => "))?;
                     self.termdag.print_term_with_printer(*term, printer)?;
+                    printer.newline()?;
                 }
-                printer.decrease_indent();
-                printer.write_with_break("}}, Body Pfs: [")?;
+                printer.newline()?;
+                printer.write_with_break("},")?;
+                printer.newline()?;
+                printer.write_with_break("Body Pfs: [")?;
                 printer.increase_indent();
                 for (i, pf) in body_pfs.iter().enumerate() {
                     if i > 0 {
@@ -296,37 +305,51 @@ impl ProofStore {
                     }
                 }
                 printer.decrease_indent();
-                printer.write_with_break("], Result: ")?;
+                printer.write_with_break("], ")?;
+                printer.newline()?;
+                printer.write_with_break(" Result: ")?;
                 self.termdag.print_term_with_printer(*result_lhs, printer)?;
                 printer.write_str(" = ")?;
                 self.termdag.print_term_with_printer(*result_rhs, printer)?;
-                printer.write_str(")")
+                printer.write_str(")")?;
+                printer.decrease_indent();
             }
             EqProof::PRefl { t_ok_pf, t } => {
                 printer.write_str("PRefl(")?;
                 self.print_term_proof_with_printer(*t_ok_pf, printer)?;
                 printer.write_str(", (term= ")?;
                 self.termdag.print_term_with_printer(*t, printer)?;
-                printer.write_str("))")
+                printer.write_str("))")?
             }
             EqProof::PSym { eq_pf } => {
                 printer.write_str("PSym(")?;
                 self.print_eq_proof_with_printer(*eq_pf, printer)?;
-                printer.write_str(")")
+                printer.write_str(")")?
             }
             EqProof::PTrans { pfxy, pfyz } => {
                 printer.write_str("PTrans(")?;
+                printer.increase_indent();
+                printer.increase_indent();
+                printer.newline()?;
                 self.print_eq_proof_with_printer(*pfxy, printer)?;
-                printer.write_with_break(", ")?;
+                printer.decrease_indent();
+                printer.newline()?;
+                printer.write_with_break(" ... and then ... ")?;
+                printer.increase_indent();
+                printer.newline()?;
                 self.print_eq_proof_with_printer(*pfyz, printer)?;
-                printer.write_str(")")
+                printer.decrease_indent();
+                printer.decrease_indent();
+                printer.newline()?;
+                printer.write_str(")")?
             }
             EqProof::PCong(cong_pf) => {
                 printer.write_str("PCong[Equality](")?;
                 self.print_cong_with_printer(cong_pf, printer)?;
-                printer.write_str(")")
+                printer.write_str(")")?
             }
         }
+        printer.newline()
     }
 
     /// Print the term proof in a human-readable format to the given writer.
@@ -353,6 +376,7 @@ impl ProofStore {
             } => {
                 printer.write_str(&format!("PRule[Existence]({rule_name:?}, Subst {{"))?;
                 printer.increase_indent();
+                printer.newline()?;
                 for (i, (var, term)) in subst.iter().enumerate() {
                     if i > 0 {
                         printer.write_str(",")?;
@@ -360,9 +384,12 @@ impl ProofStore {
                     printer.write_with_break(" ")?;
                     printer.write_str(&format!("{var:?} => "))?;
                     self.termdag.print_term_with_printer(*term, printer)?;
+                    printer.newline()?;
                 }
-                printer.decrease_indent();
-                printer.write_with_break("}}, Body Pfs: [")?;
+                printer.newline()?;
+                printer.write_with_break("},")?;
+                printer.newline()?;
+                printer.write_with_break("Body Pfs: [")?;
                 printer.increase_indent();
                 for (i, pf) in body_pfs.iter().enumerate() {
                     if i > 0 {

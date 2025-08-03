@@ -107,6 +107,10 @@ fn ac_test(tracing: bool, can_subsume: bool) {
         let _eq_explanation = egraph
             .explain_terms_equal(left_root, right_root, &mut proof_store)
             .unwrap();
+        let todo_remove = 1;
+        proof_store
+            .print_eq_proof(_eq_explanation, &mut std::io::stderr())
+            .unwrap();
     }
 }
 
