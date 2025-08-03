@@ -328,7 +328,7 @@ impl EGraph {
                 // rid of the clone.
                 let schema = info.schema.clone();
                 let mut args = Vec::with_capacity(term_row.len() - 1);
-                for (ty, entry) in schema.iter().zip(term_row[1..].iter()) {
+                for (ty, entry) in schema[0..schema.len() - 1].iter().zip(term_row[1..].iter()) {
                     args.push(self.reconstruct_term(*entry, *ty, state));
                 }
                 state
@@ -432,7 +432,7 @@ impl EGraph {
         let info = &self.funcs[func_id];
         let schema = info.schema.clone();
         let mut args_eq_proofs = Vec::with_capacity(schema.len() - 1);
-        for (i, (ty, (lhs, rhs))) in schema
+        for (i, (ty, (lhs, rhs))) in schema[0..schema.len() - 1]
             .iter()
             .zip(old_term_row[1..].iter().zip(new_term_row[1..].iter()))
             .enumerate()
