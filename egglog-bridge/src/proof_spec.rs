@@ -57,9 +57,6 @@ pub(crate) struct ProofBuilder {
     lhs_term_vars: Vec<Variable>,
     rhs_term_vars: Vec<Variable>,
     representatives: HashMap<Variable, usize>,
-    // The "syntax" fields are used to build a checker for the proofs in this
-    // rule.
-    source_syntax: Option<SourceSyntax>,
     pub(crate) term_vars: DenseIdMap<AtomId, QueryEntry>,
 }
 
@@ -80,7 +77,6 @@ impl ProofBuilder {
             lhs_term_vars: Default::default(),
             rhs_term_vars: Default::default(),
             representatives: Default::default(),
-            source_syntax: None,
             term_vars: Default::default(),
         }
     }
@@ -142,25 +138,6 @@ impl ProofBuilder {
         }
     }
 
-    /// Construct a reason associated with this rule and bind it to `reason_var`.
-    pub(crate) fn make_reason(
-        &mut self,
-        reason_var: Variable,
-        db: &mut EGraph,
-    ) -> impl Fn(&mut Bindings, &mut RuleBuilder) -> Result<()> + Clone {
-        let syntax = self
-            .source_syntax
-            .as_ref()
-            .cloned()
-            .expect("must specify syntax when proofs are enabled");
-        let cb = self.create_reason(syntax, db);
-        move |bndgs, rb| {
-            let res = cb(bndgs, rb)?;
-            bndgs.mapping.insert(reason_var, res.into());
-            Ok(())
-        }
-    }
-
     /// Generate a callback that will add a row to the term database, as well as
     /// a reason for that term existing.
     pub(crate) fn new_row(
@@ -168,25 +145,23 @@ impl ProofBuilder {
         func: FunctionId,
         entries: Vec<QueryEntry>,
         term_var: Variable,
-        reason_var: Variable,
         db: &mut EGraph,
     ) -> impl Fn(&mut Bindings, &mut RuleBuilder) -> Result<()> + Clone {
-        let make_reason = self.make_reason(reason_var, db);
         self.add_rhs(&entries, term_var);
         let func_table = db.funcs[func].table;
         let term_table = db.term_table(func_table);
         let func_val = Value::new(func.rep());
         move |inner, rb| {
-            if !inner.mapping.contains_key(reason_var) {
-                make_reason(inner, rb)?;
-            }
+            let reason_var = inner
+                .lhs_reason
+                .expect("must have a reason variable for new rows");
             let mut translated = Vec::new();
             translated.push(func_val.into());
             for entry in &entries[0..entries.len() - 1] {
                 translated.push(inner.convert(entry));
             }
             translated.push(inner.mapping[term_var]);
-            translated.push(inner.mapping[reason_var]);
+            translated.push(reason_var);
             rb.insert(term_table, &translated)?;
             Ok(())
         }

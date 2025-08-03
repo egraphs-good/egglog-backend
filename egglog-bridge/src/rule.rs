@@ -601,16 +601,11 @@ impl RuleBuilder<'_> {
                     let term_var = self.new_var(ColumnTy::Id);
                     self.query.vars[res].term_var = term_var;
                     let ts_var = self.new_var(ColumnTy::Id);
-                    let reason_var = self.new_var(ColumnTy::Id);
                     let mut insert_entries = entries.to_vec();
                     insert_entries.push(res.into());
-                    let add_proof = self.proof_builder.new_row(
-                        func,
-                        insert_entries,
-                        term_var,
-                        reason_var,
-                        self.egraph,
-                    );
+                    let add_proof =
+                        self.proof_builder
+                            .new_row(func, insert_entries, term_var, self.egraph);
                     Box::new(move |inner, rb| {
                         let write_vals = get_write_vals(inner);
                         let dst_vars = inner.convert_all(&entries);
@@ -740,15 +735,10 @@ impl RuleBuilder<'_> {
                     *id = self.query.vars[*id].term_var;
                 }
             }
-            let reason_var = self.new_var(ColumnTy::Id);
-            let add_proof = self.proof_builder.make_reason(reason_var, self.egraph);
             Box::new(move |inner, rb| {
                 let l = inner.convert(&l);
                 let r = inner.convert(&r);
-                if !inner.mapping.contains_key(reason_var) {
-                    add_proof(inner, rb)?;
-                }
-                let proof = inner.mapping[reason_var];
+                let proof = inner.lhs_reason.expect("reason must be set");
                 rb.insert(inner.uf_table, &[l, r, inner.next_ts(), proof])
                     .context("union")
             })
@@ -1074,7 +1064,7 @@ pub(crate) struct Bindings {
     next_ts: Option<DstVar>,
     /// If proofs are enabled, this variable contains the "reason id" for any union or insertion
     /// that happens on the RHS of a rule.
-    lhs_reason: Option<DstVar>,
+    pub(crate) lhs_reason: Option<DstVar>,
     pub(crate) mapping: DenseIdMap<Variable, DstVar>,
     grounded: HashSet<Variable>,
 }
