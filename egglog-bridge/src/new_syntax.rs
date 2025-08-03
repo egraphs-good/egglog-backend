@@ -33,12 +33,17 @@ pub enum SourceExpr {
     /// A constant.
     Const { ty: ColumnTy, val: Value },
     /// A single variable.
-    Var { id: Variable, name: String },
+    Var {
+        id: Variable,
+        ty: ColumnTy,
+        name: String,
+    },
     /// A call to an external (aka primitive) function.
     ExternalCall {
         /// This external function call must be present in the destination query, and bound to this
         /// variable
         var: Variable,
+        ty: ColumnTy,
         func: ExternalFunctionId,
         args: Vec<SyntaxId>,
     },
@@ -58,9 +63,9 @@ pub enum SourceExpr {
 /// line, along with a backing store accounting for subterms indexed by [`SyntaxId].
 #[derive(Debug, Clone, Default)]
 pub struct SourceSyntax {
-    backing: IdVec<SyntaxId, SourceExpr>,
-    vars: Vec<Variable>,
-    roots: Vec<TopLevelLhsExpr>,
+    pub(crate) backing: IdVec<SyntaxId, SourceExpr>,
+    pub(crate) vars: Vec<(Variable, ColumnTy)>,
+    pub(crate) roots: Vec<TopLevelLhsExpr>,
 }
 
 impl SourceSyntax {
@@ -71,8 +76,8 @@ impl SourceSyntax {
     pub fn add_expr(&mut self, expr: SourceExpr) -> SyntaxId {
         match &expr {
             SourceExpr::Const { .. } | SourceExpr::FunctionCall { .. } => {}
-            SourceExpr::Var { id, .. } => self.vars.push(*id),
-            SourceExpr::ExternalCall { var, .. } => self.vars.push(*var),
+            SourceExpr::Var { id, ty, .. } => self.vars.push((*id, *ty)),
+            SourceExpr::ExternalCall { var, ty, .. } => self.vars.push((*var, *ty)),
         };
         self.backing.push(expr)
     }
@@ -92,18 +97,15 @@ impl SourceSyntax {
     }
 }
 
-type TodoRenameRuleData2ToRuleData = ();
-
 /// The data associated with a proof of a given term whose premises are given by a
 /// [`SourceSyntax`].
 #[derive(Debug)]
-pub(crate) struct RuleData2 {
-    rule_id: RuleId,
-    syntax: SourceSyntax,
-    // That's it?
+pub(crate) struct RuleData {
+    pub(crate) rule_id: RuleId,
+    pub(crate) syntax: SourceSyntax,
 }
 
-impl RuleData2 {
+impl RuleData {
     pub(crate) fn n_vars(&self) -> usize {
         self.syntax.vars.len()
     }
@@ -121,7 +123,7 @@ impl ProofBuilder {
             metadata.insert(func, self.build_cong_metadata(func, egraph));
         }
 
-        let reason_spec = Arc::new(ProofReason::Rule2(RuleData2 {
+        let reason_spec = Arc::new(ProofReason::Rule(RuleData {
             rule_id: self.rule_id,
             syntax: syntax.clone(),
         }));
@@ -152,7 +154,7 @@ impl ProofBuilder {
             // the base substitution of variables into a reason table.
             let mut row = SmallVec::<[core_relations::QueryEntry; 8]>::new();
             row.push(Value::new(reason_id.rep()).into());
-            for var in &syntax.vars {
+            for (var, _) in &syntax.vars {
                 row.push(bndgs.mapping[*var]);
             }
             Ok(rb.lookup_or_insert(

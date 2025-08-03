@@ -45,7 +45,7 @@ impl NumericId for usize {
 ///
 /// This mapping is _dense_: it stores a flat array indexed by `K::index()`,
 /// with no hashing. For sparse mappings, use a HashMap.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct DenseIdMap<K, V> {
     data: Vec<Option<V>>,
     _marker: PhantomData<K>,
