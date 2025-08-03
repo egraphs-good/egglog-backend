@@ -1,4 +1,4 @@
-//! A proof format for egglog programs, based on the Roq format and checker from Tia Vu, Ryan
+//! A proof format for egglog programs, based on the Rocq format and checker from Tia Vu, Ryan
 //! Doegens, and Oliver Flatt.
 use std::{io, rc::Rc};
 

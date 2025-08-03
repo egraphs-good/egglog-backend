@@ -8,11 +8,11 @@ use hashbrown::{HashMap, HashSet};
 use numeric_id::{define_id, DenseIdMap, NumericId};
 
 use crate::{
-    new_syntax::{RuleData, SourceSyntax, SyntaxId},
     proof_format::{
         CongProof, EqProof, EqProofId, Premise, ProofStore, Term, TermId, TermProof, TermProofId,
     },
     rule::{AtomId, Bindings, DstVar, Variable},
+    syntax::{RuleData, SourceSyntax, SyntaxId},
     ColumnTy, EGraph, FunctionId, GetFirstMatch, QueryEntry, Result, RuleId, SideChannel,
     SourceExpr, TopLevelLhsExpr,
 };

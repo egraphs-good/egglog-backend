@@ -33,15 +33,15 @@ use smallvec::SmallVec;
 use web_time::{Duration, Instant};
 
 pub mod macros;
-pub(crate) mod new_syntax;
 pub mod proof_format;
 pub(crate) mod proof_spec;
 pub(crate) mod rule;
+pub(crate) mod syntax;
 #[cfg(test)]
 mod tests;
 
-pub use new_syntax::{SourceExpr, SourceSyntax, TopLevelLhsExpr};
 pub use rule::{Function, QueryEntry, RuleBuilder};
+pub use syntax::{SourceExpr, SourceSyntax, TopLevelLhsExpr};
 use thiserror::Error;
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]

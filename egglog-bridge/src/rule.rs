@@ -17,7 +17,7 @@ use numeric_id::{define_id, DenseIdMap, NumericId};
 use smallvec::SmallVec;
 use thiserror::Error;
 
-use crate::new_syntax::SourceSyntax;
+use crate::syntax::SourceSyntax;
 use crate::{
     proof_spec::{ProofBuilder, RebuildVars},
     ColumnTy, DefaultVal, EGraph, FunctionId, Result, RuleId, RuleInfo, Timestamp,
@@ -466,7 +466,8 @@ impl RuleBuilder<'_> {
         &mut self,
         func: ExternalFunctionId,
         entries: &[QueryEntry],
-        ret_ty: ColumnTy,
+        // NB: not clear if we still need this now that proof checker is in a separate crate.
+        _ret_ty: ColumnTy,
     ) -> Result<()> {
         let entries = entries.to_vec();
         self.query.add_rule.push(Box::new(move |inner, rb| {

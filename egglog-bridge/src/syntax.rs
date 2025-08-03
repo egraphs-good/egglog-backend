@@ -1,5 +1,9 @@
-//! A new replacement for the `syntax` module. We eventually want to replace `syntax.rs` with this
-//! module.
+//! Egglog proofs reference the source syntax of the query, but the syntax in `egglog-bridge` is a
+//! lower-level, "desugared" representation of that syntax.
+//!
+//! This module defines the [`SourceSyntax`] and [`SourceExpr`] types, which allow callers to
+//! reflect the syntax of the original egglog query, along with how it maps to the desugared query
+//! language in this crate. The proofs machinery then reconstructs proofs according to this syntax.
 use std::{iter, sync::Arc};
 
 use crate::{EGraph, ProofReason, QueryEntry, ReasonSpecId, Result, SchemaMath, NOT_SUBSUMED};
@@ -15,8 +19,6 @@ use crate::{
     rule::{AtomId, Bindings, Variable},
     ColumnTy, FunctionId, RuleId,
 };
-
-type TodoRenameModule = ();
 
 define_id!(pub SyntaxId, u32, "an offset into a Syntax DAG.");
 
