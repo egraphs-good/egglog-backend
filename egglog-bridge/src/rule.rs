@@ -44,7 +44,7 @@ struct VarInfo {
     term_var: Variable,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum QueryEntry {
     Var {
         id: Variable,
@@ -287,7 +287,7 @@ impl RuleBuilder<'_> {
         self.build_internal(Some(syntax))
     }
 
-    fn build_internal(mut self, syntax: Option<SourceSyntax>) -> RuleId {
+    pub(crate) fn build_internal(mut self, syntax: Option<SourceSyntax>) -> RuleId {
         if self.query.atoms.len() == 1 {
             self.query.plan_strategy = PlanStrategy::MinCover;
         }

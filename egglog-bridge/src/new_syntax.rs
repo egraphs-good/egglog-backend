@@ -16,6 +16,8 @@ use crate::{
     ColumnTy, FunctionId, RuleId,
 };
 
+type TodoRenameModule = ();
+
 define_id!(pub SyntaxId, u32, "an offset into a Syntax DAG.");
 
 #[derive(Debug, Clone)]
@@ -86,6 +88,7 @@ impl SourceSyntax {
     pub fn add_toplevel_expr(&mut self, expr: TopLevelLhsExpr) {
         self.roots.push(expr);
     }
+
     fn funcs(&self) -> impl Iterator<Item = FunctionId> + '_ {
         self.backing.iter().filter_map(|(_, v)| {
             if let SourceExpr::FunctionCall { func, .. } = v {

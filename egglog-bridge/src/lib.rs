@@ -44,7 +44,7 @@ pub use new_syntax::{SourceExpr, SourceSyntax, TopLevelLhsExpr};
 pub use rule::{Function, QueryEntry, RuleBuilder};
 use thiserror::Error;
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub enum ColumnTy {
     Id,
     Base(BaseValueId),
@@ -957,7 +957,7 @@ impl EGraph {
 
         // Remove the old row and insert the new one.
         rb.rebuild_row(table, &vars, &canon, subsume_var);
-        rb.build()
+        rb.build_internal(None)
     }
 
     fn nonincremental_rebuild(&mut self, table: FunctionId, schema: &[ColumnTy]) -> RuleId {
@@ -991,7 +991,7 @@ impl EGraph {
         }
         rb.check_for_update(&lhs, &rhs).unwrap();
         rb.rebuild_row(table, &vars, &canon, subsume_var);
-        rb.build()
+        rb.build_internal(None) // skip the syntax check
     }
 
     /// Gives the user a handle to the underlying ExecutionState. Useful for staging updates
