@@ -117,6 +117,18 @@ impl RuleData {
 }
 
 impl ProofBuilder {
+    /// Given a [`SourceSyntax`] build a callback that returns a variable corresponding to the id
+    /// of the "reason" for a given rule. This callback does two things, both based on the context
+    /// of the syntax being passed in:
+    ///
+    /// 1. It reconstructs any terms specified by the syntax. This is done by applying congruence
+    ///    rules to the `AtomId`s mapped in the syntax.
+    ///
+    /// 2. It writes a reason holding the concrete substitution corersponding to the current match
+    ///    for this syntax.
+    ///
+    /// Like most of the rest of this crate, the return value is a callback that consumes state
+    /// associated with instantiating a rule in the `core-relations` sense.
     pub(crate) fn create_reason(
         &mut self,
         syntax: SourceSyntax,
@@ -269,14 +281,23 @@ impl TermReconstructionState<'_> {
 /// recreates terms justified by congruence.
 #[derive(Clone)]
 struct CongArgs {
+    /// The function that we are applying congruence to.
     func_table: FunctionId,
+    /// The undcerlying `core_relations` table that this function corresponds to.
     func_underlying: TableId,
+    /// Schema-related offset information needed for writing to the table.
     schema_math: SchemaMath,
+    /// The table that will hold the reason justifying the new term, if we need to insert one.
     reason_table: TableId,
+    /// The table that will hold the new term, if we need to insert one.
     term_table: TableId,
+    /// The counter that will be incremented when we insert a new reason.
     reason_counter: CounterId,
+    /// The counter that will be incremented when we insert a new term.
     term_counter: CounterId,
+    /// The counter that will be used to read the current timestamp for the new row.
     ts_counter: CounterId,
+    /// The specification (or schema) for the reason we are writing (congruence, in this case).
     reason_spec_id: ReasonSpecId,
 }
 
@@ -314,21 +335,3 @@ fn cong_term(args: &CongArgs, es: &mut ExecutionState, vals: &[Value]) -> Option
     es.stage_insert(args.func_underlying, &term_row);
     Some(term_val)
 }
-
-// Next steps to get to parity:
-// [x] use the reason var in insertions / lookup-or-insert / union, rather than the old thign
-// [x] builder API for SourceSyntax
-// [ ] get rid of all unused warnings
-// [ ] proof reconstruction, but no checker
-//    [ ]  Figure out how "unions" work in FromRule (may want to mirror Oliver's format more
-//    closely)
-//    [ ]  Add a term, not term-proof memo to ProofReconstructionState and then use it.
-//
-// [x] rip everything out
-//
-// =====
-// What happens after parity?
-//
-// [ ] figure out what to do about non-constructor functions
-// [ ]     "log of operations" semantics, somehow. Each row is a proof that (f ...) "may equal" t
-// [ ] containers (conceptually easier)

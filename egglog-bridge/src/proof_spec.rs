@@ -49,14 +49,6 @@ impl ProofReason {
 pub(crate) struct ProofBuilder {
     pub(crate) rule_description: Arc<str>,
     pub(crate) rule_id: RuleId,
-    lhs_atoms: Vec<Vec<QueryEntry>>,
-    /// The atom against which to compare during proofs. Serves as a guide for
-    /// generating equality proofs.
-    to_compare: Vec<usize>,
-    rhs_atoms: Vec<Vec<QueryEntry>>,
-    lhs_term_vars: Vec<Variable>,
-    rhs_term_vars: Vec<Variable>,
-    representatives: HashMap<Variable, usize>,
     pub(crate) term_vars: DenseIdMap<AtomId, QueryEntry>,
 }
 
@@ -71,29 +63,8 @@ impl ProofBuilder {
         ProofBuilder {
             rule_id,
             rule_description: description.into(),
-            lhs_atoms: Default::default(),
-            rhs_atoms: Default::default(),
-            to_compare: Default::default(),
-            lhs_term_vars: Default::default(),
-            rhs_term_vars: Default::default(),
-            representatives: Default::default(),
             term_vars: Default::default(),
         }
-    }
-
-    pub(crate) fn add_lhs(&mut self, entries: &[QueryEntry], term_var: Variable) {
-        let id_var = entries.last().expect("entries should be nonempty").var();
-        let to_compare = *self
-            .representatives
-            .entry(id_var)
-            .or_insert(self.lhs_atoms.len());
-        self.lhs_atoms.push(entries.to_vec());
-        self.to_compare.push(to_compare);
-        self.lhs_term_vars.push(term_var);
-    }
-    pub(crate) fn add_rhs(&mut self, entries: &[QueryEntry], term_var: Variable) {
-        self.rhs_atoms.push(entries.to_vec());
-        self.rhs_term_vars.push(term_var);
     }
 
     /// Generate a proof for a newly rebuilt row.
@@ -147,7 +118,6 @@ impl ProofBuilder {
         term_var: Variable,
         db: &mut EGraph,
     ) -> impl Fn(&mut Bindings, &mut RuleBuilder) -> Result<()> + Clone {
-        self.add_rhs(&entries, term_var);
         let func_table = db.funcs[func].table;
         let term_table = db.term_table(func_table);
         let func_val = Value::new(func.rep());
@@ -195,7 +165,7 @@ impl<'a> ProofReconstructionState<'a> {
 impl EGraph {
     /// Given the base `subst`, reconstruct the hierarchy of term ids for a given piece of
     /// SourceSyntax.
-    fn get_syntax_vals(
+    fn get_syntax_val(
         &mut self,
         node: SyntaxId,
         syntax: &SourceSyntax,
@@ -217,7 +187,7 @@ impl EGraph {
                 let mut row_key = Vec::with_capacity(args.len() + 1);
                 row_key.push(Value::new(func.rep()));
                 for arg in args {
-                    row_key.push(self.get_syntax_vals(*arg, syntax, subst, memo));
+                    row_key.push(self.get_syntax_val(*arg, syntax, subst, memo));
                 }
                 let term_table = self.term_table(self.funcs[*func].table);
                 self.db
@@ -249,12 +219,12 @@ impl EGraph {
         for toplevel in &syntax.roots {
             match toplevel {
                 TopLevelLhsExpr::Exists(id) => {
-                    let val = self.get_syntax_vals(*id, syntax, &subst_val, &mut terms);
+                    let val = self.get_syntax_val(*id, syntax, &subst_val, &mut terms);
                     premises.push(Premise::TermOk(self.explain_term_inner(val, state)));
                 }
                 TopLevelLhsExpr::Eq(id1, id2) => {
-                    let lhs = self.get_syntax_vals(*id1, syntax, &subst_val, &mut terms);
-                    let rhs = self.get_syntax_vals(*id2, syntax, &subst_val, &mut terms);
+                    let lhs = self.get_syntax_val(*id1, syntax, &subst_val, &mut terms);
+                    let rhs = self.get_syntax_val(*id2, syntax, &subst_val, &mut terms);
                     premises.push(Premise::Eq(self.explain_terms_equal_inner(lhs, rhs, state)));
                 }
             }
@@ -284,7 +254,7 @@ impl EGraph {
             ProofReason::Rule(data) => {
                 let (subst, body_pfs) = self.rule_proof(data, &reason_row[1..], state);
                 let result = self.reconstruct_term(term_id, ColumnTy::Id, state);
-                state.store.intern_term(TermProof::PRule {
+                state.store.intern_term(&TermProof::PRule {
                     rule_name: String::from(&*self.rules[data.rule_id].desc).into(),
                     subst,
                     body_pfs,
@@ -293,11 +263,11 @@ impl EGraph {
             }
             ProofReason::CongRow => {
                 let cong = self.create_cong_proof(reason_row[1], term_id, state);
-                state.store.intern_term(TermProof::PCong(cong))
+                state.store.intern_term(&TermProof::PCong(cong))
             }
             ProofReason::Fiat { desc } => {
                 let term = self.reconstruct_term(term_id, ColumnTy::Id, state);
-                state.store.intern_term(TermProof::PFiat {
+                state.store.intern_term(&TermProof::PFiat {
                     desc: String::from(&**desc).into(),
                     term,
                 })
@@ -366,14 +336,11 @@ impl EGraph {
         if let Some(prev) = state.eq_memo.get(&(l, r)) {
             return *prev;
         }
-        #[allow(clippy::never_loop)]
-        let res = loop {
-            // We are using a loop as a block that we can break out of.
-            if l == r {
-                let term = self.reconstruct_term(l, ColumnTy::Id, state);
-                let term_proof = self.explain_term_inner(l, state);
-                break state.store.refl(term_proof, term);
-            }
+        let res = if l == r {
+            let term = self.reconstruct_term(l, ColumnTy::Id, state);
+            let term_proof = self.explain_term_inner(l, state);
+            state.store.refl(term_proof, term)
+        } else {
             let uf_table = self
                 .db
                 .get_table(self.uf_table)
@@ -393,21 +360,19 @@ impl EGraph {
             debug_assert!(steps.first().is_some_and(|s| s.lhs == l));
             debug_assert!(steps.last().is_some_and(|s| s.rhs == r));
 
-            break {
-                let subproofs: Vec<_> = steps
-                    .into_iter()
-                    .map(|ProofStep { lhs, rhs, reason }| match reason {
-                        UfProofReason::Forward(reason) => {
-                            self.create_eq_proof_step(reason, lhs, rhs, state)
-                        }
-                        UfProofReason::Backward(reason) => {
-                            let base = self.create_eq_proof_step(reason, rhs, lhs, state);
-                            state.store.sym(base)
-                        }
-                    })
-                    .collect();
-                state.store.sequence_proofs(&subproofs)
-            };
+            let subproofs: Vec<_> = steps
+                .into_iter()
+                .map(|ProofStep { lhs, rhs, reason }| match reason {
+                    UfProofReason::Forward(reason) => {
+                        self.create_eq_proof_step(reason, lhs, rhs, state)
+                    }
+                    UfProofReason::Backward(reason) => {
+                        let base = self.create_eq_proof_step(reason, rhs, lhs, state);
+                        state.store.sym(base)
+                    }
+                })
+                .collect();
+            state.store.sequence_proofs(&subproofs)
         };
         state.eq_memo.insert((l, r), res);
         res
@@ -443,7 +408,7 @@ impl EGraph {
                     assert_eq!(lhs, rhs, "congruence proof must have equal base values");
                     // For an equality proof, we first need an existence proof, which we can get by
                     // doing a projection from the existence proof of `old_term`.
-                    let arg_exists = state.store.intern_term(TermProof::PProj {
+                    let arg_exists = state.store.intern_term(&TermProof::PProj {
                         pf_f_args_ok: old_term_proof,
                         arg_idx: i,
                     });
@@ -477,7 +442,7 @@ impl EGraph {
                 let l_term = self.reconstruct_term(l, ColumnTy::Id, state);
                 let r_term = self.reconstruct_term(r, ColumnTy::Id, state);
                 let rule_name = String::from(&*self.rules[data.rule_id].desc).into();
-                state.store.intern_eq(EqProof::PRule {
+                state.store.intern_eq(&EqProof::PRule {
                     rule_name,
                     subst,
                     body_pfs,
@@ -487,7 +452,7 @@ impl EGraph {
             }
             ProofReason::CongRow => {
                 let cong = self.create_cong_proof(l, r, state);
-                state.store.intern_eq(EqProof::PCong(cong))
+                state.store.intern_eq(&EqProof::PCong(cong))
             }
             ProofReason::Fiat { .. } => {
                 // NB: we could add this if we wanted to.

@@ -386,7 +386,6 @@ impl RuleBuilder<'_> {
         let res = AtomId::from_usize(self.query.atoms.len());
         if self.egraph.tracing {
             let proof_var = atom[schema_math.proof_id_col()].var();
-            self.proof_builder.add_lhs(entries, proof_var);
             self.proof_builder.term_vars.insert(res, proof_var.into());
             self.query.atom_proofs.push(proof_var);
             if let Some(QueryEntry::Var { id, .. }) = entries.last() {
@@ -665,7 +664,6 @@ impl RuleBuilder<'_> {
                 let panic_func = self.egraph.new_panic_lazy(panic_msg);
                 if self.egraph.tracing {
                     let term_var = self.new_var(ColumnTy::Id);
-                    self.proof_builder.add_lhs(&entries, term_var);
                     Box::new(move |inner, rb| {
                         let dst_vars = inner.convert_all(&entries);
                         let var = rb.lookup_with_fallback(

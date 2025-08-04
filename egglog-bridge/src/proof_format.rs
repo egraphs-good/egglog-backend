@@ -1,11 +1,10 @@
 //! A proof format for egglog programs, based on the Rocq format and checker from Tia Vu, Ryan
 //! Doegens, and Oliver Flatt.
-use std::{io, rc::Rc};
+use std::{hash::Hash, io, rc::Rc};
 
 use core_relations::Value;
-use hashbrown::{hash_map::Entry, HashMap};
 use indexmap::IndexSet;
-use numeric_id::{define_id, DenseIdMap, IdVec, NumericId};
+use numeric_id::{define_id, DenseIdMap, NumericId};
 
 use crate::{rule::Variable, FunctionId};
 
@@ -14,82 +13,39 @@ define_id!(pub EqProofId, u32, "an id identifying proofs of equality between two
 define_id!(pub TermId, u32, "an id identifying terms within a [`TermDag`]");
 
 #[derive(Clone, Debug)]
-pub struct PrettyPrintConfig {
-    pub line_width: usize,
-    pub indent_size: usize,
+struct HashCons<K, T> {
+    data: IndexSet<T>,
+    _marker: std::marker::PhantomData<K>,
 }
 
-impl Default for PrettyPrintConfig {
+impl<K, T> Default for HashCons<K, T> {
     fn default() -> Self {
-        Self {
-            line_width: 512,
-            indent_size: 4,
+        HashCons {
+            data: IndexSet::new(),
+            _marker: std::marker::PhantomData,
         }
     }
 }
 
-struct PrettyPrinter<'w, W: io::Write> {
-    writer: &'w mut W,
-    config: &'w PrettyPrintConfig,
-    current_indent: usize,
-    current_line_pos: usize,
-}
-
-impl<'w, W: io::Write> PrettyPrinter<'w, W> {
-    fn new(writer: &'w mut W, config: &'w PrettyPrintConfig) -> Self {
-        Self {
-            writer,
-            config,
-            current_indent: 0,
-            current_line_pos: 0,
+impl<K: NumericId, T: Clone + Eq + Hash> HashCons<K, T> {
+    fn get_or_insert(&mut self, value: &T) -> K {
+        if let Some((index, _)) = self.data.get_full(value) {
+            K::from_usize(index)
+        } else {
+            let id = K::from_usize(self.data.len());
+            self.data.insert(value.clone());
+            id
         }
     }
 
-    fn write_str(&mut self, s: &str) -> io::Result<()> {
-        write!(self.writer, "{s}")?;
-        self.current_line_pos += s.len();
-        Ok(())
-    }
-
-    fn newline(&mut self) -> io::Result<()> {
-        writeln!(self.writer)?;
-        self.current_line_pos = 0;
-        self.write_indent()?;
-        Ok(())
-    }
-
-    fn write_indent(&mut self) -> io::Result<()> {
-        for _ in 0..self.current_indent {
-            write!(self.writer, " ")?;
-        }
-        self.current_line_pos = self.current_indent;
-        Ok(())
-    }
-
-    fn increase_indent(&mut self) {
-        self.current_indent += self.config.indent_size;
-    }
-
-    fn decrease_indent(&mut self) {
-        self.current_indent = self.current_indent.saturating_sub(self.config.indent_size);
-    }
-
-    fn should_break(&self, additional_chars: usize) -> bool {
-        self.current_line_pos + additional_chars > self.config.line_width
-    }
-
-    fn write_with_break(&mut self, s: &str) -> io::Result<()> {
-        if self.should_break(s.len()) && self.current_line_pos > self.current_indent {
-            self.newline()?;
-            self.write_indent()?;
-        }
-        self.write_str(s)
+    fn lookup(&self, id: K) -> Option<&T> {
+        self.data.get_index(id.index())
     }
 }
 
 #[derive(Default, Clone)]
 pub struct TermDag {
-    store: IndexSet<Term>,
+    store: HashCons<TermId, Term>,
 }
 
 impl TermDag {
@@ -114,7 +70,7 @@ impl TermDag {
         term: TermId,
         printer: &mut PrettyPrinter<W>,
     ) -> io::Result<()> {
-        let term = self.store.get_index(term.index()).unwrap();
+        let term = self.store.lookup(term).unwrap();
         match term {
             Term::Constant { id, rendered } => {
                 if let Some(rendered) = rendered {
@@ -146,17 +102,11 @@ impl TermDag {
     ///
     /// The [`TermId`]s in this term should point into this same [`TermDag`].
     pub fn get_or_insert(&mut self, term: &Term) -> TermId {
-        if let Some((index, _)) = self.store.get_full(term) {
-            TermId::from_usize(index)
-        } else {
-            let id = TermId::from_usize(self.store.len());
-            self.store.insert(term.clone());
-            id
-        }
+        self.store.get_or_insert(term)
     }
 
     pub(crate) fn proj(&self, term: TermId, arg_idx: usize) -> TermId {
-        let term = self.store.get_index(term.index()).unwrap();
+        let term = self.store.lookup(term).unwrap();
         match term {
             Term::Func { args, .. } => {
                 if arg_idx < args.len() {
@@ -185,10 +135,8 @@ pub enum Term {
 /// A hash-cons store for proofs and terms related to an egglog program.
 #[derive(Clone, Default)]
 pub struct ProofStore {
-    pub(crate) eq_store: IdVec<EqProofId, EqProof>,
-    pub(crate) term_store: IdVec<TermProofId, TermProof>,
-    pub(crate) eq_memo: HashMap<EqProof, EqProofId>,
-    pub(crate) term_memo: HashMap<TermProof, TermProofId>,
+    eq_memo: HashCons<EqProofId, EqProof>,
+    term_memo: HashCons<TermProofId, TermProof>,
     pub(crate) termdag: TermDag,
 }
 
@@ -260,7 +208,7 @@ impl ProofStore {
         eq_pf: EqProofId,
         printer: &mut PrettyPrinter<W>,
     ) -> io::Result<()> {
-        let eq_pf = self.eq_store.get(eq_pf).unwrap();
+        let eq_pf = self.eq_memo.lookup(eq_pf).unwrap();
         match eq_pf {
             EqProof::PRule {
                 rule_name,
@@ -366,7 +314,7 @@ impl ProofStore {
         term_pf: TermProofId,
         printer: &mut PrettyPrinter<W>,
     ) -> io::Result<()> {
-        let term_pf = self.term_store.get(term_pf).unwrap();
+        let term_pf = self.term_memo.lookup(term_pf).unwrap();
         match term_pf {
             TermProof::PRule {
                 rule_name,
@@ -435,40 +383,26 @@ impl ProofStore {
             }
         }
     }
-    pub(crate) fn intern_term(&mut self, prf: TermProof) -> TermProofId {
-        match self.term_memo.entry(prf) {
-            Entry::Occupied(entry) => *entry.get(),
-            Entry::Vacant(entry) => {
-                let id = self.term_store.push(entry.key().clone());
-                entry.insert(id);
-                id
-            }
-        }
+    pub(crate) fn intern_term(&mut self, prf: &TermProof) -> TermProofId {
+        self.term_memo.get_or_insert(prf)
     }
-    pub(crate) fn intern_eq(&mut self, prf: EqProof) -> EqProofId {
-        match self.eq_memo.entry(prf) {
-            Entry::Occupied(entry) => *entry.get(),
-            Entry::Vacant(entry) => {
-                let id = self.eq_store.push(entry.key().clone());
-                entry.insert(id);
-                id
-            }
-        }
+    pub(crate) fn intern_eq(&mut self, prf: &EqProof) -> EqProofId {
+        self.eq_memo.get_or_insert(prf)
     }
 
     pub(crate) fn refl(&mut self, proof: TermProofId, term: TermId) -> EqProofId {
-        self.intern_eq(EqProof::PRefl {
+        self.intern_eq(&EqProof::PRefl {
             t_ok_pf: proof,
             t: term,
         })
     }
 
     pub(crate) fn sym(&mut self, proof: EqProofId) -> EqProofId {
-        self.intern_eq(EqProof::PSym { eq_pf: proof })
+        self.intern_eq(&EqProof::PSym { eq_pf: proof })
     }
 
     pub(crate) fn trans(&mut self, pfxy: EqProofId, pfyz: EqProofId) -> EqProofId {
-        self.intern_eq(EqProof::PTrans { pfxy, pfyz })
+        self.intern_eq(&EqProof::PTrans { pfxy, pfyz })
     }
 
     pub(crate) fn sequence_proofs(&mut self, pfs: &[EqProofId]) -> EqProofId {
@@ -556,10 +490,79 @@ pub enum EqProof {
     /// Proves f(x1, y1, ...) = f(x2, y2, ...) where f is fun_sym
     /// A proof via congruence- one proof for each child of the term
     /// pf_f_args_ok is a proof that the term with the lhs children is valid
-    ///
     PCong(CongProof),
 }
 
-#[allow(clippy::enum_variant_names)]
-#[derive(Clone, PartialEq, Eq, Hash)]
-pub enum ProofTerm {}
+#[derive(Clone, Debug)]
+pub struct PrettyPrintConfig {
+    pub line_width: usize,
+    pub indent_size: usize,
+}
+
+impl Default for PrettyPrintConfig {
+    fn default() -> Self {
+        Self {
+            line_width: 512,
+            indent_size: 4,
+        }
+    }
+}
+
+struct PrettyPrinter<'w, W: io::Write> {
+    writer: &'w mut W,
+    config: &'w PrettyPrintConfig,
+    current_indent: usize,
+    current_line_pos: usize,
+}
+
+impl<'w, W: io::Write> PrettyPrinter<'w, W> {
+    fn new(writer: &'w mut W, config: &'w PrettyPrintConfig) -> Self {
+        Self {
+            writer,
+            config,
+            current_indent: 0,
+            current_line_pos: 0,
+        }
+    }
+
+    fn write_str(&mut self, s: &str) -> io::Result<()> {
+        write!(self.writer, "{s}")?;
+        self.current_line_pos += s.len();
+        Ok(())
+    }
+
+    fn newline(&mut self) -> io::Result<()> {
+        writeln!(self.writer)?;
+        self.current_line_pos = 0;
+        self.write_indent()?;
+        Ok(())
+    }
+
+    fn write_indent(&mut self) -> io::Result<()> {
+        for _ in 0..self.current_indent {
+            write!(self.writer, " ")?;
+        }
+        self.current_line_pos = self.current_indent;
+        Ok(())
+    }
+
+    fn increase_indent(&mut self) {
+        self.current_indent += self.config.indent_size;
+    }
+
+    fn decrease_indent(&mut self) {
+        self.current_indent = self.current_indent.saturating_sub(self.config.indent_size);
+    }
+
+    fn should_break(&self, additional_chars: usize) -> bool {
+        self.current_line_pos + additional_chars > self.config.line_width
+    }
+
+    fn write_with_break(&mut self, s: &str) -> io::Result<()> {
+        if self.should_break(s.len()) && self.current_line_pos > self.current_indent {
+            self.newline()?;
+            self.write_indent()?;
+        }
+        self.write_str(s)
+    }
+}
