@@ -1,5 +1,7 @@
 # egglog-backend
 
+**Note: the development of this backend has been migrated to the egglog repository.**
+
 This is the repo for the database-like backend to [`egglog`](https://github.com/egraphs-good/egglog).
 
 You can use the existing egglog [Zulip](https://egraphs.zulipchat.com/#narrow/stream/375765-egglog) chat to ask questions and suggest improvements to this repo.
